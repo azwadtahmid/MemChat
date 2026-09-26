@@ -1,42 +1,59 @@
-from openai import OpenAI
+import ollama
 from mem0 import Memory
-from dotenv import load_dotenv
-
-load_dotenv("../.env")
 
 config = {
+    "llm": {
+        "provider": "ollama",
+        "config": {
+            "model": "llama3.2:3b",
+            "temperature": 0,
+            "ollama_base_url": "http://localhost:11434",
+        },
+    },
+    "embedder": {
+        "provider": "ollama",
+        "config": {
+            "model": "nomic-embed-text",
+            "ollama_base_url": "http://localhost:11434",
+        },
+    },
     "vector_store": {
         "provider": "qdrant",
-        "config": {"host": "localhost", "port": 6333},
+        "config": {
+            "collection_name": "mem0_ollama",
+            "embedding_model_dims": 768,
+            "host": "localhost",
+            "port": 6333,
+        },
     },
 }
 
-openai_client = OpenAI()
 memory = Memory.from_config(config)
 
 
 def chat_with_memories(message: str, user_id: str = "default_user") -> str:
-    # Retrieve relevant memories
-    relevant_memories = memory.search(query=message, user_id=user_id, limit=3)
+    relevant_memories = memory.search(
+        query=message, filters={"user_id": user_id}, limit=3
+    )
     memories_str = "\n".join(
         f"- {entry['memory']}" for entry in relevant_memories["results"]
     )
-    print(memories_str)
+    if memories_str:
+        print(f"[memories]\n{memories_str}")
 
-    # Generate Assistant response
-    system_prompt = f"You are a helpful AI. Answer the question based on query and memories.\nUser Memories:\n{memories_str}"
+    system_prompt = (
+        "You are a helpful AI. Answer the question based on query and memories.\n"
+        f"User Memories:\n{memories_str}"
+    )
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": message},
     ]
-    response = openai_client.chat.completions.create(
-        model="gpt-4o-mini", messages=messages
-    )
-    assistant_response = response.choices[0].message.content
 
-    # Create new memories from the conversation
+    response = ollama.chat(model="llama3.2:3b", messages=messages)
+    assistant_response = response["message"]["content"]
+
     messages.append({"role": "assistant", "content": assistant_response})
-    # This is where the magic happens
     memory.add(messages, user_id=user_id, metadata={"source": "demo"})
 
     return assistant_response

@@ -118,3 +118,4 @@ CLAUDE.md
 # Codex
 .agents/
 AGENTS.md
+knowledge/mem0/qdrant_ollama/

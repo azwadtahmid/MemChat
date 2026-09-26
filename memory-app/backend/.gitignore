@@ -1,0 +1,4 @@
+.env
+audio_files/
+.model_cache/
+__pycache__/
