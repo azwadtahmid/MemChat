@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, localDate, ServiceError, type Note, type NoteType } from '../api'
+import { api, API_BASE, localDate, ServiceError, type Note, type NoteType } from '../api'
 import Checklist from '../components/Checklist'
 import { BackIcon, CheckIcon, RestoreIcon, TrashIcon } from '../icons'
 import { TypeBadge } from '../components/NoteCard'
@@ -212,7 +212,7 @@ export default function EditorView({
 
       {type === 'audio' && note?.audio_url && (
         // The URL carries a short-lived signed token, not the user id.
-        <audio className="audio-player" controls preload="metadata" src={`/api${note.audio_url}`} />
+        <audio className="audio-player" controls preload="metadata" src={`${API_BASE}${note.audio_url}`} />
       )}
 
       {type === 'list' && !rawList ? (

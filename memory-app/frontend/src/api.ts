@@ -6,6 +6,12 @@ import { loadUserIdentity } from './userId'
 
 export const identity = loadUserIdentity()
 
+// Where the backend lives. In dev, VITE_API_URL is unset and requests go to
+// /api, which the Vite proxy forwards to the backend with /api stripped. In a
+// production build there is no proxy, so VITE_API_URL names the backend's
+// origin directly; its paths have no /api prefix, so none is added.
+export const API_BASE = (import.meta.env.VITE_API_URL ?? '').trim().replace(/\/+$/, '') || '/api'
+
 export type NoteType = 'text' | 'list' | 'diary' | 'audio'
 
 export interface Note {
@@ -87,7 +93,7 @@ async function request(path: string, init: RequestInit = {}): Promise<Response> 
   if (typeof init.body === 'string') headers.set('Content-Type', 'application/json')
   let res: Response
   try {
-    res = await fetch(`/api${path}`, { ...init, headers })
+    res = await fetch(`${API_BASE}${path}`, { ...init, headers })
   } catch {
     throw new ServiceError([BACKEND_DOWN])
   }

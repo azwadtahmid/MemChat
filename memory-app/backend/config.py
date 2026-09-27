@@ -53,5 +53,14 @@ class Settings(BaseSettings):
     chat_search_limit: int = 5
     chat_history_messages: int = 40
 
+    # ---------- CORS ----------
+    # Browser origins allowed to call the API, comma separated. In dev the Vite
+    # proxy makes calls same-origin; a deployed frontend needs its URL here.
+    allowed_origins: str = "http://localhost:5173"
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [o.strip().rstrip("/") for o in self.allowed_origins.split(",") if o.strip()]
+
 
 settings = Settings()

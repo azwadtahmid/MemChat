@@ -2,6 +2,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool
 
 import health
@@ -29,6 +30,15 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="MemChat", lifespan=lifespan)
 register(app)
+# Every header request() in the frontend sends must be listed, or the browser's
+# preflight rejects the call. Audio plays through a plain <audio src>, which
+# needs no CORS.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["X-User-Id", "X-Client-Date", "Content-Type"],
+)
 app.include_router(notes_router)
 app.include_router(chat_router)
 
