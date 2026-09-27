@@ -19,8 +19,10 @@ class Settings(BaseSettings):
     groq_transcribe_model: str = "whisper-large-v3"
 
     # ---------- Qdrant ----------
-    qdrant_host: str = "localhost"
-    qdrant_port: int = 6333
+    # A full URL, so a hosted Qdrant Cloud endpoint works. Unset or empty means
+    # the local Docker Qdrant, with no API key.
+    qdrant_url: str = ""
+    qdrant_api_key: str = ""
     # New names on purpose: QDRANT_COLLECTION and EMBEDDING_DIMS in an existing
     # .env still point at the old 768-dim mem0 collection.
     notes_collection: str = "notes"

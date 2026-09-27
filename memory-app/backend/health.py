@@ -11,7 +11,6 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-import httpx
 from fastapi.concurrency import run_in_threadpool
 
 import embeddings
@@ -24,7 +23,6 @@ log = logging.getLogger("memchat")
 
 QDRANT, GROQ, EMBEDDINGS = "qdrant", "groq", "embeddings"
 CHAT_MODEL, TRANSCRIBE_MODEL = "groq_chat_model", "groq_transcribe_model"
-QDRANT_URL = f"http://{settings.qdrant_host}:{settings.qdrant_port}"
 
 # The Groq probe is a real API call, so its result is reused briefly.
 _GROQ_CACHE_SECONDS = 15
@@ -32,11 +30,11 @@ _groq_cache: tuple[float, dict[str, Problem]] | None = None
 
 
 async def _probe_qdrant() -> Problem | None:
+    # Through the same client as the app, so the URL, port and API key match.
     try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            (await client.get(f"{QDRANT_URL}/collections")).raise_for_status()
-    except httpx.HTTPError:
-        return Problem("qdrant", f"Qdrant is not reachable at {QDRANT_URL}",
+        await run_in_threadpool(lambda: store.client().get_collections())
+    except Exception:
+        return Problem("qdrant", f"Qdrant is not reachable at {store.qdrant_url()}",
                        "Start it from knowledge/mem0/docker with: docker compose up -d")
     try:
         await run_in_threadpool(store.ensure_collection)

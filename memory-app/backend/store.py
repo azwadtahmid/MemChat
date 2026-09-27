@@ -33,10 +33,14 @@ _lock = threading.Lock()
 _ready = False
 
 
+def qdrant_url() -> str:
+    return settings.qdrant_url.strip() or "http://localhost:6333"
+
+
 def client() -> QdrantClient:
     global _client
     if _client is None:
-        _client = QdrantClient(host=settings.qdrant_host, port=settings.qdrant_port, timeout=5)
+        _client = QdrantClient(url=qdrant_url(), api_key=settings.qdrant_api_key or None, timeout=5)
     return _client
 
 

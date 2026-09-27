@@ -107,8 +107,8 @@ other variable has the default shown.
 | `CHAT_SEARCH_LIMIT` | `5` | Notes the assistant sees per search |
 | `CHAT_MAX_TOOL_ROUNDS` | `6` | Most tool calls the assistant may chain in one reply |
 | `CHAT_HISTORY_MESSAGES` | `40` | Most recent chat messages sent to the model |
-| `QDRANT_HOST` | `localhost` | |
-| `QDRANT_PORT` | `6333` | |
+| `QDRANT_URL` | `http://localhost:6333` | Full URL. Empty means the local Docker Qdrant. For Qdrant Cloud, the cluster URL including `:6333` |
+| `QDRANT_API_KEY` | empty | Needed for Qdrant Cloud; empty for local |
 | `NOTES_COLLECTION` | `notes` | Qdrant collection, created automatically |
 | `EMBED_MODEL` | `BAAI/bge-small-en-v1.5` | fastembed model |
 | `EMBED_DIMS` | `384` | Must match the embedding model |
