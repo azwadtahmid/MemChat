@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     # ---------- Groq ----------
     groq_api_key: SecretStr = SecretStr("")
     groq_base_url: str = "https://api.groq.com/openai/v1"
-    groq_chat_model: str = "llama-3.3-70b-versatile"
+    groq_chat_model: str = "openai/gpt-oss-120b"
     groq_transcribe_model: str = "whisper-large-v3"
 
     # ---------- Qdrant ----------
@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     trash_retention_days: int = 30
     search_limit: int = 8
     chat_max_tool_rounds: int = 6
+    # gpt-oss reasons before answering; its reasoning tokens count against Groq's
+    # per-minute token limit, so keep it low unless answers need more thought.
+    chat_reasoning_effort: str = "low"
+    chat_search_limit: int = 5
     chat_history_messages: int = 40
 
 

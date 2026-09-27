@@ -63,7 +63,7 @@ groq_client.async_client = lambda: NS(chat=NS(completions=FakeCompletions()))
 
 
 async def groq_ok():
-    return None
+    return {}
 
 
 health._probe_groq = groq_ok  # no key needed: Groq itself is faked
@@ -91,7 +91,7 @@ def turn(user, script, *, message=None, answer=None, history=(), source="typed",
     events = [json.loads(line) for line in r.text.splitlines() if line.strip()]
     out = {"status": 200, "events": events, "types": [e["type"] for e in events]}
     out["messages"] = next(e["messages"] for e in events if e["type"] == "messages")
-    out["history"] = list(history) + [{"role": "user", "content": message}] * (message is not None) + out["messages"]
+    out["history"] = list(history) + out["messages"]  # messages already includes the user message
     out["tool_results"] = [json.loads(m["content"]) for m in out["messages"] if m["role"] == "tool"]
     out["changed"] = [(e["action"], e["note"]["title"]) for e in events if e["type"] == "note_changed"]
     out["ask"] = next((e for e in events if e["type"] == "ask_user"), None)
@@ -204,6 +204,48 @@ check("a tool call left unanswered by an interrupted turn is repaired",
 r = turn(A, [openai.APIConnectionError(request=httpx.Request("POST", "https://api.groq.com"))], message="hi")
 check("Groq failing mid-turn gives a named error, not a traceback",
       [e["message"] for e in r["events"] if e["type"] == "error"], ["Groq is unreachable"])
+
+def rate_limited(seconds):
+    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    response = httpx.Response(429, headers={"retry-after": str(seconds)}, request=request)
+    return openai.RateLimitError("Rate limit reached", response=response, body=None)
+
+
+def rejected_tool_call():
+    return openai.APIError("Tool call validation failed: parameters for tool list_notes did not match schema",
+                           request=httpx.Request("POST", "https://api.groq.com"), body=None)
+
+
+def reply_text(r):
+    return "".join(e.get("content", "") for e in r["events"] if e["type"] == "token")
+
+
+r = turn(A, [rate_limited(1), text("Here you go.")], message="hi")
+check("short rate limit: the user is told, then it retries and answers",
+      ([e["type"] for e in r["events"] if e["type"] in ("notice", "error")], "Here you go" in reply_text(r)),
+      (["notice"], True))
+check("  ...the notice names the limit and the wait",
+      "rate limiting" in next(e["message"] for e in r["events"] if e["type"] == "notice"), True)
+groq_client.rate_limited_until = None
+r = turn(A, [rate_limited(45)], message="hi")
+err = next(e for e in r["events"] if e["type"] == "error")
+check("long rate limit: ends with the named problem and the wait",
+      (err["message"], "45" in err["hint"] or "46" in err["hint"]), ("Groq is rate limiting requests", True))
+check("  ...and /health reports it until it clears", groq_client.rate_limit_problem() is not None, True)
+groq_client.rate_limited_until = None
+r = turn(A, [rejected_tool_call(), text("Recovered.")], message="list my notes")
+check("a tool call Groq rejects is retried once", "Recovered" in reply_text(r), True)
+r = turn(A, [rejected_tool_call(), rejected_tool_call()], message="list my notes")
+check("  ...and if it fails again, a readable message",
+      [e["message"] for e in r["events"] if e["type"] == "error"], ["The assistant made an invalid request"])
+
+print("\n== Answer format")
+r = turn(A, [text("From general knowledge: boil it for about 5–6 minutes.")], message="how long to boil an egg?")
+check("a general-only answer opens with the nothing-in-notes line",
+      reply_text(r).startswith("Nothing in your notes about that.\n\nFrom general knowledge:"), True)
+check("en and em dashes are replaced with plain hyphens", "–" in reply_text(r) or "—" in reply_text(r), False)
+r = turn(A, [text("Milk and bread (Groceries, 26 September 2026).")], message="what's on my list?")
+check("a notes-backed answer is left as written", reply_text(r).strip(), "Milk and bread (Groceries, 26 September 2026).")
 
 print("\n== Cleanup")
 for u in (A, B):

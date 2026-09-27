@@ -15,11 +15,12 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 
 import store
+from config import settings
 from errors import AppError
 
 log = logging.getLogger("memchat")
 
-BODY_LIMIT = 1500  # characters of each note body shown to the model
+BODY_LIMIT = 800  # characters of each note body shown to the model (tokens are rate limited)
 
 
 @dataclass
@@ -38,7 +39,10 @@ class Refused(Exception):
 
 # ---------- Schemas ----------
 
-NOTE_TYPE = {"type": "string", "enum": ["text", "list", "diary", "audio"]}
+# Optional parameters accept null: gpt-oss sends "type": null rather than
+# leaving the field out, and Groq rejects tool calls that fail the schema.
+NOTE_TYPE = {"type": ["string", "null"], "enum": ["text", "list", "diary", "audio", None]}
+OPTIONAL_TEXT = {"type": ["string", "null"]}
 WRITABLE_TYPE = {"type": "string", "enum": ["text", "list", "diary"]}
 
 
@@ -59,7 +63,7 @@ SCHEMAS = [
     _tool("append_to_note", "Add text to the end of a note. For lists, one item per line.",
           {"note_id": {"type": "string"}, "text": {"type": "string"}}, ["note_id", "text"]),
     _tool("update_note", "Replace a note's title and/or body. Only when the user asks to rewrite or correct.",
-          {"note_id": {"type": "string"}, "title": {"type": "string"}, "body": {"type": "string"}}, ["note_id"]),
+          {"note_id": {"type": "string"}, "title": OPTIONAL_TEXT, "body": OPTIONAL_TEXT}, ["note_id"]),
     _tool("delete_note", "Move a note to the trash. Requires a confirm_delete answer from ask_user for this note first.",
           {"note_id": {"type": "string"}}, ["note_id"]),
     _tool("restore_note", "Restore a note from the trash.",
@@ -69,7 +73,7 @@ SCHEMAS = [
            "options": {"type": "array", "items": {"type": "object", "properties": {
                "label": {"type": "string"},
                "value": {"type": "string", "description": "choose, confirm_delete, cancel, or another short keyword"},
-               "note_id": {"type": "string"}}, "required": ["label", "value"]}}},
+               "note_id": OPTIONAL_TEXT}, "required": ["label", "value"]}}},
           ["question", "options"]),
 ]
 
@@ -138,7 +142,7 @@ def _confirmed_delete(turn: Turn, note_id: str) -> bool:
 
 
 def search_notes(turn: Turn, query: str, type: str | None = None) -> dict:
-    found = store.search(turn.user_id, query, type)
+    found = store.search(turn.user_id, query, type, limit=settings.chat_search_limit)
     return {"results": [summary(n) for n in found]} if found else {"results": [], "note": "No matching notes."}
 
 

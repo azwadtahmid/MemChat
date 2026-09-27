@@ -1,239 +1,242 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import {
-  clearMemories,
-  getHealth,
-  listMemories,
-  ServiceError,
-  streamChat,
-  type Health,
-  type Problem,
-  type MemoryItem,
-} from './api'
-import Chat, { type Message } from './Chat'
-import Header from './Header'
-import { MemoryPanel, MemoryRail, type Retrieved } from './MemoryPanel'
-import { loadUserIdentity } from './userId'
+import { api, localDate, ServiceError, type Health, type Note, type NoteType, type Problem } from './api'
+import ChatPanel from './components/ChatPanel'
+import Rail, { type Filter, type Tab } from './Rail'
+import Scenery from './scenery/Landscape'
+import DiaryView from './views/DiaryView'
+import EditorView from './views/EditorView'
+import NotesView from './views/NotesView'
+import TrashView from './views/TrashView'
 
-const PANEL_KEY = 'memchat.panelOpen'
+type View =
+  | { kind: Tab }
+  | { kind: 'editor'; noteId: string | null; newType: NoteType; back: Tab; fresh?: boolean }
 
-function problemsOf(err: unknown): Problem[] {
-  if (err instanceof ServiceError) return err.problems
-  // Anything else is a bug in the page itself: log it, never render it.
-  console.error(err)
-  return [
-    {
-      service: 'backend',
-      message: 'MemChat hit an unexpected error',
-      hint: 'Details are in the browser console. Reloading the page usually clears it.',
-    },
-  ]
-}
+const CHAT_KEY = 'memchat.chatOpen'
+const HIGHLIGHT_MS = 2200
 
-const describe = (ps: Problem[]) => ps.map((p) => p.message).join('. ')
-
-// localStorage can throw in private windows or when site data is blocked.
-function readPanelOpen(): boolean {
+function readChatOpen(): boolean {
   try {
-    return localStorage.getItem(PANEL_KEY) === 'true'
+    return localStorage.getItem(CHAT_KEY) === 'true'
   } catch {
     return false
   }
 }
 
+/** The vermillion-free seal on the chat tab: an ink seal impression. */
+function Seal() {
+  return (
+    <svg className="seal" width="20" height="20" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+      <path d="M3.4 3.6c4.4-.3 8.8-.2 13.2.1.3 4.2.3 8.5 0 12.7-4.4.3-8.8.2-13.2-.1-.3-4.2-.3-8.5 0-12.7z" fill="none" stroke="currentColor" strokeWidth="1.6" />
+      <path d="M7 7.1c2-.1 4-.1 6 .1M10 7.2v6M7.2 10.2c1.9-.1 3.8-.1 5.7 0" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  )
+}
+
 export default function App() {
-  // Read (or create) this browser's id once; every memory request is scoped to it.
-  const [identity] = useState(loadUserIdentity)
+  const [view, setView] = useState<View>({ kind: 'notes' })
+  const [filter, setFilter] = useState<Filter>('all')
   const [health, setHealth] = useState<Health | null>(null)
   const [checking, setChecking] = useState(true)
   const [problems, setProblems] = useState<Problem[]>([])
-  const [messages, setMessages] = useState<Message[]>([])
-  const [busy, setBusy] = useState(false)
-  const [retrieved, setRetrieved] = useState<Retrieved | null>(null)
-  const [allMemories, setAllMemories] = useState<MemoryItem[]>([])
-  const [savesPending, setSavesPending] = useState(0)
-  const [saveNote, setSaveNote] = useState<string | null>(null)
-  const [clearing, setClearing] = useState(false)
-  const [panelOpen, setPanelOpen] = useState(readPanelOpen)
-  const [pulseKey, setPulseKey] = useState(0)
-  const railRef = useRef<HTMLButtonElement>(null)
+  const [chatOpen, setChatOpen] = useState(readChatOpen)
+  const [version, setVersion] = useState(0) // bumps whenever notes change
+  const [highlights, setHighlights] = useState<Record<string, string>>({}) // note id -> chat action
+  const [dirtyNote, setDirtyNote] = useState<string | null>(null)
+  const tabRef = useRef<HTMLButtonElement>(null)
+
+  const tab: Tab = view.kind === 'editor' ? view.back : view.kind
 
   useEffect(() => {
     try {
-      localStorage.setItem(PANEL_KEY, String(panelOpen))
+      localStorage.setItem(CHAT_KEY, String(chatOpen))
     } catch {
       // Not persisted; the panel still works for this session.
     }
-  }, [panelOpen])
+  }, [chatOpen])
 
-  const closePanel = useCallback(() => {
-    setPanelOpen(false)
-    railRef.current?.focus()
+  const closeChat = useCallback(() => {
+    setChatOpen(false)
+    // After the render that shows the tab again; a hidden element cannot take focus.
+    window.setTimeout(() => tabRef.current?.focus(), 0)
   }, [])
 
   useEffect(() => {
-    if (!panelOpen) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') closePanel()
-    }
+    if (!chatOpen) return
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && closeChat()
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [panelOpen, closePanel])
-
-  const refreshMemories = useCallback(async () => {
-    try {
-      setAllMemories(await listMemories(identity.id))
-    } catch (err) {
-      setProblems(problemsOf(err))
-    }
-  }, [identity.id])
+  }, [chatOpen, closeChat])
 
   const checkHealth = useCallback(async () => {
     setChecking(true)
     try {
-      const h = await getHealth()
+      const h = await api.health()
       setHealth(h)
       setProblems(h.problems)
-      if (h.ok) await refreshMemories()
     } catch (err) {
-      setProblems(problemsOf(err))
+      setProblems(err instanceof ServiceError ? err.problems : [])
     } finally {
       setChecking(false)
     }
-  }, [refreshMemories])
+  }, [])
 
   useEffect(() => {
     void checkHealth()
   }, [checkHealth])
 
-  const updateMessage = (id: string, change: (m: Message) => Partial<Message>) =>
-    setMessages((ms) => ms.map((m) => (m.id === id ? { ...m, ...change(m) } : m)))
-
-  async function send(text: string) {
-    const replyId = crypto.randomUUID()
-    setMessages((ms) => [
-      ...ms,
-      { id: crypto.randomUUID(), role: 'user', content: text, status: 'done', enterIndex: 0 },
-      { id: replyId, role: 'assistant', content: '', status: 'streaming', phase: 'searching', enterIndex: 1 },
-    ])
-    setBusy(true)
-    setRetrieved({ query: text, memories: null })
-
-    let replyDone = false
-    let saveSettled = false
-    const settleSave = (note: string) => {
-      saveSettled = true
-      setSavesPending((n) => n - 1)
-      setSaveNote(note)
+  // Failures from any view land in the banner as named problems, never raw errors.
+  const onProblem = useCallback((err: unknown) => {
+    if (err instanceof ServiceError) setProblems(err.problems)
+    else {
+      console.error(err)
+      setProblems([{ service: 'backend', message: 'MemChat hit an unexpected error', hint: 'Details are in the browser console.' }])
     }
+  }, [])
 
+  const onDirtyChange = useCallback((noteId: string | null, dirty: boolean) => {
+    setDirtyNote((current) => (dirty ? noteId : current === noteId ? null : current))
+  }, [])
+
+  function openNote(note: Note) {
+    setHighlights(({ [note.id]: _seen, ...rest }) => rest)
+    if (note.deleted) setView({ kind: 'trash' })
+    else setView({ kind: 'editor', noteId: note.id, newType: note.type, back: tab === 'trash' ? 'notes' : tab })
+  }
+
+  // Choosing a filter from anywhere shows the notes with that filter.
+  function chooseFilter(f: Filter) {
+    setFilter(f)
+    setView({ kind: 'notes' })
+  }
+
+  // Today's diary entry, created if it does not exist yet (the backend returns
+  // the existing entry when there is one).
+  async function openToday() {
     try {
-      await streamChat(identity.id, text, (e) => {
-        switch (e.type) {
-          case 'memories':
-            setRetrieved({ query: text, memories: e.memories })
-            updateMessage(replyId, () => ({ phase: 'generating' }))
-            break
-          case 'token':
-            updateMessage(replyId, (m) => ({ content: m.content + e.content }))
-            break
-          case 'done':
-            replyDone = true
-            updateMessage(replyId, () => ({ status: 'done' }))
-            setBusy(false)
-            setSavesPending((n) => n + 1)
-            break
-          case 'stored':
-            settleSave(
-              e.count === 0
-                ? 'The last exchange had nothing new to remember.'
-                : `Saved ${e.count} ${e.count === 1 ? 'memory' : 'memories'} from the last exchange.`,
-            )
-            // Refresh first, then pulse, so the rail animates as its count changes.
-            if (e.count > 0) void refreshMemories().then(() => setPulseKey((k) => k + 1))
-            break
-          case 'error':
-            if (replyDone) settleSave(e.message)
-            else updateMessage(replyId, () => ({ status: 'error', error: e.hint ? `${e.message}. ${e.hint}` : e.message }))
-            break
-        }
-      })
-      setProblems([])
+      const existing = (await api.listNotes('diary')).find((n) => n.entry_date === localDate())
+      if (existing) return setView({ kind: 'editor', noteId: existing.id, newType: 'diary', back: tab })
+      const { note } = await api.createNote('diary', '', '')
+      setVersion((v) => v + 1)
+      setView({ kind: 'editor', noteId: note.id, newType: 'diary', back: tab, fresh: true })
     } catch (err) {
-      const found = problemsOf(err)
-      setProblems(found)
-      updateMessage(replyId, () => ({ status: 'error', error: describe(found) }))
-      setRetrieved(null)
-    } finally {
-      setBusy(false)
-      // The connection closed before the backend reported the save result.
-      if (replyDone && !saveSettled) settleSave('The connection closed before saving finished.')
+      onProblem(err)
     }
   }
 
-  async function clearAll() {
-    setClearing(true)
+  // New note: text and list notes are created straight away.
+  async function createNote(type: Exclude<NoteType, 'audio'>) {
+    if (type === 'diary') return void openToday()
     try {
-      await clearMemories(identity.id)
-      setRetrieved(null)
-      setSaveNote(null)
-      await refreshMemories()
+      const { note } = await api.createNote(type, '', '')
+      setVersion((v) => v + 1)
+      setView({ kind: 'editor', noteId: note.id, newType: type, back: 'notes', fresh: true })
     } catch (err) {
-      setProblems(problemsOf(err))
-    } finally {
-      setClearing(false)
+      onProblem(err)
     }
   }
+
+  function onSaved(note: Note) {
+    setVersion((v) => v + 1)
+    // A new note becomes an existing one once saved, so further saves update it.
+    setView((v) => (v.kind === 'editor' && v.noteId === null && !note.deleted ? { ...v, noteId: note.id } : v))
+  }
+
+  // The assistant changed a note: refresh, and flash that note briefly.
+  const onNoteChanged = useCallback((action: string, note: Note) => {
+    setVersion((v) => v + 1)
+    if (action === 'deleted') return
+    setHighlights((h) => ({ ...h, [note.id]: action }))
+    window.setTimeout(() => {
+      setHighlights(({ [note.id]: _done, ...rest }) => rest)
+    }, HIGHLIGHT_MS)
+  }, [])
 
   return (
-    <div className="app">
-      <Header
+    <div className="shell">
+      <Rail
+        tab={tab}
+        onTab={(t) => setView({ kind: t })}
+        filter={filter}
+        onFilter={chooseFilter}
         health={health}
-        userId={identity.id}
         problems={problems}
         checking={checking}
         onRecheck={() => void checkHealth()}
       />
 
-      {problems.length > 0 && (
-        <div className="banner" role="alert">
-          <ul>
-            {problems.map((p) => (
-              <li key={p.message}>
-                <strong>{p.message}</strong>
-                {p.hint && <span className="banner-hint">{p.hint}</span>}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      <main className="field">
+        {/* The ink landscape: top right of the field, clear of all text, and
+            faded into the paper before the notes begin. */}
+        <Scenery />
 
-      <main className="layout">
-        <Chat messages={messages} busy={busy} onSend={(t) => void send(t)} />
+        {problems.length > 0 && (
+          <div className="banner" role="alert">
+            <ul>
+              {problems.map((p) => (
+                <li key={p.message}>
+                  <strong>{p.message}</strong>
+                  {p.hint && <span className="banner-hint">{p.hint}</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
-        <MemoryRail
-          ref={railRef}
-          count={allMemories.length}
-          open={panelOpen}
-          saving={savesPending > 0}
-          pulseKey={pulseKey}
-          onOpen={() => setPanelOpen(true)}
-        />
-
-        <div className="scrim" data-open={panelOpen} onClick={closePanel} aria-hidden="true" />
-
-        <MemoryPanel
-          open={panelOpen}
-          onClose={closePanel}
-          identity={identity}
-          retrieved={retrieved}
-          allMemories={allMemories}
-          savesPending={savesPending}
-          saveNote={saveNote}
-          clearing={clearing}
-          canClear={!busy && savesPending === 0 && allMemories.length > 0}
-          onClear={() => void clearAll()}
-        />
+        {view.kind === 'notes' && (
+          <NotesView
+            filter={filter}
+            version={version}
+            highlights={highlights}
+            onOpen={openNote}
+            onCreate={(t) => void createNote(t)}
+            onProblem={onProblem}
+          />
+        )}
+        {view.kind === 'diary' && (
+          <DiaryView version={version} highlights={highlights} onOpen={openNote} onToday={() => void openToday()} onProblem={onProblem} />
+        )}
+        {view.kind === 'trash' && <TrashView version={version} onChanged={() => setVersion((v) => v + 1)} onProblem={onProblem} />}
+        {view.kind === 'editor' && (
+          <EditorView
+            key={view.noteId ?? `new-${view.newType}`}
+            noteId={view.noteId}
+            newType={view.newType}
+            version={version}
+            retentionDays={health?.config.trash_retention_days ?? 30}
+            fresh={!!view.fresh}
+            onDiscarded={() => setVersion((v) => v + 1)}
+            onBack={() => setView({ kind: view.back })}
+            onSaved={onSaved}
+            onDirtyChange={onDirtyChange}
+            onProblem={onProblem}
+          />
+        )}
       </main>
+
+      {/* Click-away layer for the chat panel. Transparent: nothing tints the page. */}
+      <div className="scrim" data-open={chatOpen} onClick={closeChat} aria-hidden="true" />
+
+      <button
+        ref={tabRef}
+        type="button"
+        className="chat-tab"
+        data-hidden={chatOpen}
+        onClick={() => setChatOpen(true)}
+        aria-expanded={chatOpen}
+        aria-controls="chat-panel"
+      >
+        <Seal />
+        <span className="chat-tab-label">Assistant</span>
+      </button>
+
+      <ChatPanel
+        open={chatOpen}
+        onClose={closeChat}
+        lockedNoteIds={dirtyNote ? [dirtyNote] : []}
+        onNoteChanged={onNoteChanged}
+        onOpenNote={openNote}
+      />
     </div>
   )
 }

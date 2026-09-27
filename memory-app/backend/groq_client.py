@@ -52,7 +52,9 @@ def async_client() -> AsyncOpenAI:
             api_key=settings.groq_api_key.get_secret_value(),
             base_url=settings.groq_base_url,
             timeout=60,
-            max_retries=1,
+            # No silent SDK retries: chat/agent.py retries itself and tells the
+            # user it is waiting for Groq's rate limit.
+            max_retries=0,
         )
     return _async_client
 
@@ -85,23 +87,49 @@ def problem_from(exc: Exception) -> Problem:
         return Problem("groq", "Groq rejected the API key", "Check GROQ_API_KEY in memory-app/backend/.env.")
     if isinstance(exc, (openai.APIConnectionError, openai.APITimeoutError)):
         return Problem("groq", "Groq is unreachable", "Check your internet connection.")
+    if is_tool_call_error(exc):
+        return Problem("groq", "The assistant made an invalid request", "Try rephrasing your message.")
     if isinstance(exc, openai.APIStatusError):
         return Problem("groq", f"Groq returned an error (HTTP {exc.status_code})", "Details are in the backend log.")
     return Problem("groq", "The request to Groq failed", "Details are in the backend log.")
 
 
-def check() -> Problem | None:
-    """Health probe: can we reach Groq with this key right now?"""
-    if key_missing():
-        return missing_key_problem()
-    if problem := rate_limit_problem():
-        return problem
+def retry_after(exc: openai.RateLimitError) -> float:
     try:
-        client().models.list()
-        return None
+        return float(exc.response.headers.get("retry-after") or 30)
+    except (TypeError, ValueError, AttributeError):
+        return 30.0
+
+
+def is_tool_call_error(exc: Exception) -> bool:
+    """Groq rejected a tool call the model produced (for example, a schema mismatch)."""
+    text = str(exc).lower()
+    return isinstance(exc, openai.APIError) and ("tool call validation" in text or "tool_use_failed" in text)
+
+
+def check() -> dict[str, Problem]:
+    """Health probe. Keys: "groq" (key, connection, rate limit), "groq_chat_model",
+    "groq_transcribe_model" (configured model not available to this key)."""
+    if key_missing():
+        return {"groq": missing_key_problem()}
+    if problem := rate_limit_problem():
+        return {"groq": problem}
+    try:
+        available = {m.id for m in client().models.list().data}
     except Exception as exc:
         log.warning("Groq health check failed: %s", exc)
-        return problem_from(exc)
+        return {"groq": problem_from(exc)}
+    # A working key is not enough: Groq retires models, and a missing one would
+    # fail every chat or transcription.
+    problems: dict[str, Problem] = {}
+    for key, setting, model in (("groq_chat_model", "GROQ_CHAT_MODEL", settings.groq_chat_model),
+                                ("groq_transcribe_model", "GROQ_TRANSCRIBE_MODEL", settings.groq_transcribe_model)):
+        if model not in available:
+            log.warning("Groq model %s is not available; this key can use: %s", model, ", ".join(sorted(available)))
+            problems[key] = Problem("groq", f"Model {model} is not available on Groq",
+                                    f"Set {setting} in memory-app/backend/.env to a model your key can use. "
+                                    "The backend log lists them.")
+    return problems
 
 
 def transcribe(filename: str, data: bytes) -> str:

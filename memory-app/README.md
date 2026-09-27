@@ -1,25 +1,30 @@
 # MemChat
 
-MemChat is a local chat app with persistent, per-user memory. Each message runs
-the same loop as `knowledge/mem0/oss/memory_demo.py`:
-
-1. Search the user's stored memories for the message (mem0 + Qdrant, `nomic-embed-text` embeddings).
-2. Build a system prompt that includes those memories.
-3. Stream a reply from `llama3.2:3b` through Ollama.
-4. Save the exchange back into that user's memory (mem0 extracts facts with the same model).
+A local notes app with an assistant that answers from your notes first (and from
+general knowledge, clearly marked, when they have nothing) and can add to them. Four note types (text, list, diary, audio), a trash with restore, and a
+chat panel available from every view.
 
 ```
 memory-app/
-  backend/    FastAPI: /chat (streaming), /memories, /health
-  frontend/   React + Vite + TypeScript
+  backend/     FastAPI: notes, trash, audio, chat (Qdrant + fastembed + Groq)
+    chat/      the assistant: tool loop, tools and their rules, system prompt
+    tests/     curl proof of isolation, chat rule checks, live chat scenarios
+  frontend/    React + Vite + TypeScript
 ```
+
+- **Storage:** Qdrant, one point per note, in a collection called `notes`.
+- **Embeddings:** fastembed `BAAI/bge-small-en-v1.5` (384 dims), running locally.
+  The model (about 65 MB) downloads from Hugging Face on first use.
+- **Chat and transcription:** Groq. Chat uses `openai/gpt-oss-120b`,
+  transcription uses `whisper-large-v3`.
+- **No Ollama.** The earlier mem0 version needed it; this one does not.
 
 Qdrant itself is defined outside this folder, in `knowledge/mem0/docker/docker-compose.yml`.
 
 ## Start everything (PowerShell, in this order)
 
 Open a separate PowerShell window for each step. Every block starts from the repo
-root, so it works no matter where the window opened.
+root, so it works wherever the window opened.
 
 ### 1. Docker and Qdrant
 
@@ -33,46 +38,22 @@ docker compose up -d
 Check it is up:
 
 ```powershell
-docker version --format '{{.Server.Version}}'        # prints a version, not an error
-docker ps --filter name=qdrant                        # STATUS shows "Up"
-curl.exe http://localhost:6333/readyz                 # prints: all shards are ready
-curl.exe http://localhost:6333/collections            # lists mem0_ollama
+docker ps --filter name=qdrant                     # STATUS shows "Up"
+curl.exe http://localhost:6333/readyz              # prints: all shards are ready
 ```
 
-Memories are stored on disk in `knowledge/mem0/docker/qdrant_data` (a bind mount),
+Notes are stored on disk in `knowledge/mem0/docker/qdrant_data` (a bind mount),
 so they survive `docker compose down` and `docker compose up -d`.
 
-### 2. Ollama
-
-If the Ollama desktop app is running (llama icon in the system tray), Ollama is
-already up. Otherwise:
-
-```powershell
-ollama serve
-```
-
-Check it is up, and that both models are pulled (in another window if `ollama serve` is running):
-
-```powershell
-curl.exe http://localhost:11434/api/version   # prints {"version":"..."}
-ollama list                                    # shows llama3.2:3b and nomic-embed-text:latest
-```
-
-If a model is missing:
-
-```powershell
-ollama pull llama3.2:3b
-ollama pull nomic-embed-text
-```
-
-### 3. Backend (port 8000)
+### 2. Backend (port 8000)
 
 First time only:
 
 ```powershell
 Set-Location C:\Users\azwad\Downloads\ai-cookbook\memory-app\backend
-Copy-Item .env.example .env
 ..\..\.venv\Scripts\python.exe -m pip install -r requirements.txt
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+notepad .env        # set GROQ_API_KEY (https://console.groq.com/keys)
 ```
 
 Every time:
@@ -82,8 +63,7 @@ Set-Location C:\Users\azwad\Downloads\ai-cookbook\memory-app\backend
 ..\..\.venv\Scripts\python.exe -m uvicorn main:app --port 8000
 ```
 
-Calling the venv's `python.exe` directly means you do not need to activate the
-venv, so PowerShell's script execution policy does not get in the way.
+The backend reads `.env` only when it starts: restart it after editing `.env`.
 
 Check it is up (from another window):
 
@@ -91,11 +71,11 @@ Check it is up (from another window):
 Invoke-RestMethod http://localhost:8000/health | ConvertTo-Json -Depth 4
 ```
 
-`ok` should be `True`, with Qdrant and Ollama `up` and both models `pulled`. If
-`ok` is `False`, the `problems` list says exactly what is wrong; see
+`ok` should be `True`, with `qdrant` and `groq` `up` and both Groq models
+`available`. If not, `problems` says exactly what is wrong; see
 [Troubleshooting](#troubleshooting).
 
-### 4. Frontend (port 5173)
+### 3. Frontend (port 5173)
 
 ```powershell
 Set-Location C:\Users\azwad\Downloads\ai-cookbook\memory-app\frontend
@@ -106,160 +86,231 @@ npm run dev
 Check it is up:
 
 ```powershell
-(Invoke-RestMethod http://localhost:5173/api/health).ok   # True: Vite is reaching the backend
+(Invoke-RestMethod http://localhost:5173/api/health).ok   # True: Vite reaches the backend
 ```
 
-Then open http://localhost:5173. The top right should read **connected**. Click
-it to see the model, collection, your user ID and the state of each service.
+Open http://localhost:5173. The top right should read **connected**; click it
+for the state of every dependency and your user ID.
 
-## Your user ID
+## Environment variables
 
-Every browser gets its own ID (a random UUID) the first time it opens MemChat.
-It is kept in the browser's localStorage, and every memory is stored under it,
-so different browsers never see each other's memories. The ID is shown at the
-bottom of the memory panel and in the status popover.
+All live in `memory-app/backend/.env`. Only `GROQ_API_KEY` is required; every
+other variable has the default shown.
 
-**Clearing site data for localhost:5173 (or using a private window) gives you a
-new, empty ID.** The old memories are still in Qdrant but no longer reachable
-from that browser.
-
-This keeps users separate, but it is not authentication: anyone who knows an ID
-can read its memories through the API. That is fine for local use on your own
-machine; do not expose the backend to a network as-is.
-
-Memories created before per-user IDs existed are stored under the old shared id
-`default_user`. The app no longer accepts that id, so they are not visible in
-the UI, but they are still in Qdrant.
-
-## Configuration
-
-`backend/.env` (copied from `.env.example`):
-
-| Key | Default | Meaning |
+| Variable | Default | What it does |
 |---|---|---|
-| `OLLAMA_MODEL` | `llama3.2:3b` | Chat model, also used by mem0 to extract facts |
-| `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Embedding model |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | |
-| `QDRANT_HOST` / `QDRANT_PORT` | `localhost` / `6333` | |
-| `QDRANT_COLLECTION` | `mem0_ollama` | Same collection as the demo script |
-| `EMBEDDING_DIMS` | `768` | Must match the embedding model |
-| `MEMORY_TOP_K` | `3` | Memories retrieved per message |
-| `MEM0_TELEMETRY` | `False` | mem0 sends usage data to PostHog when `True` |
+| `GROQ_API_KEY` | (none, required) | Groq API key for chat and transcription |
+| `GROQ_BASE_URL` | `https://api.groq.com/openai/v1` | Groq's OpenAI-compatible endpoint |
+| `GROQ_CHAT_MODEL` | `openai/gpt-oss-120b` | Chat model. Must support tool calling and be available to your key |
+| `GROQ_TRANSCRIBE_MODEL` | `whisper-large-v3` | Speech-to-text for audio notes and voice input |
+| `CHAT_REASONING_EFFORT` | `low` | `low`, `medium` or `high`. gpt-oss reasoning tokens count against Groq's per-minute limit |
+| `CHAT_SEARCH_LIMIT` | `5` | Notes the assistant sees per search |
+| `CHAT_MAX_TOOL_ROUNDS` | `6` | Most tool calls the assistant may chain in one reply |
+| `CHAT_HISTORY_MESSAGES` | `40` | Most recent chat messages sent to the model |
+| `QDRANT_HOST` | `localhost` | |
+| `QDRANT_PORT` | `6333` | |
+| `NOTES_COLLECTION` | `notes` | Qdrant collection, created automatically |
+| `EMBED_MODEL` | `BAAI/bge-small-en-v1.5` | fastembed model |
+| `EMBED_DIMS` | `384` | Must match the embedding model |
+| `EMBED_CACHE_DIR` | `backend/.model_cache` | Where the embedding model is kept after download |
+| `AUDIO_DIR` | `backend/audio_files` | Where recordings are stored (see [Audio storage](#audio-storage-before-deploying)) |
+| `AUDIO_MAX_MB` | `25` | Largest recording accepted (Groq's Whisper limit) |
+| `AUDIO_TOKEN_SECRET` | random per start | Signs audio links. Set it so links survive restarts |
+| `AUDIO_TOKEN_TTL_SECONDS` | `900` | How long an audio link works (15 minutes) |
+| `TRASH_RETENTION_DAYS` | `30` | Trashed notes older than this are removed at startup |
+| `SEARCH_LIMIT` | `8` | Results for the search box in the notes view |
 
-There is deliberately no user id setting: the id always comes from the caller.
+`QDRANT_COLLECTION`, `EMBEDDING_DIMS`, `MEMORY_TOP_K`, `MEM0_TELEMETRY` and the
+`OLLAMA_*` variables belong to the old mem0 version. They are ignored and can
+be deleted from `.env`.
+
+## How it works
+
+### Your user ID
+
+Each browser creates a random ID on first load and keeps it in localStorage.
+Every request sends it in the `X-User-Id` header (never in a URL, so it stays
+out of access logs and browser history). Notes, search, chat and trash are all
+scoped to it. The ID is shown in the status popover.
+
+**Clearing site data for localhost:5173, or a private window, gives you a new,
+empty set of notes.** The ID is the only credential: anyone who has it can read
+those notes. Fine on your own machine; add real authentication before exposing
+the backend to a network.
+
+Audio files are the one exception to the header rule, because an `<audio>`
+element cannot send headers. `GET /notes/{id}` returns a signed link that
+expires after 15 minutes and does not contain the user ID.
+
+### Notes
+
+- One Qdrant point per note: `user_id, type, title, body, created, updated,
+  deleted, deleted_at, previous_body`, plus `audio_path` for audio notes and
+  `entry_date` for diary notes.
+- Every body is markdown. Lists are `- [ ]` and `- [x]` lines; ticking a box
+  rewrites that line.
+- **Undo:** every change to a body (edit, append, checkbox, undo) saves the old
+  body to `previous_body` in the same write. Undo swaps them, so undo twice redoes.
+  A title-only edit leaves the undo slot alone.
+- **Diary:** one entry per day, titled with its date. Adding to the diary on a
+  day that already has an entry appends to it.
+- **Delete is soft:** the note moves to the trash and disappears from the notes
+  view, search and the assistant. Restore brings it back; permanent delete
+  removes the Qdrant point and any audio file.
+
+### The assistant
+
+It checks your notes first and cites the note title and date for every claim
+that comes from them. When your notes have nothing relevant, it says so in one
+line and answers from general knowledge, in a separate paragraph that starts
+"From general knowledge:", so a notes-backed claim is never mixed up with a
+general one. Questions about your own life or data (a passport number, what you
+did last week) are answered only from notes; if the notes do not have it, it
+says so rather than guessing. That answering style is set in the prompt
+(`backend/chat/prompt.py`). These rules are enforced in code
+(`backend/chat/tools.py`), not only in the prompt:
+
+- Deleting requires a confirmation for that exact note, asked with the note's
+  title, type and last-edited date (the server writes that question). If more
+  than one note could be meant, it asks which one first, as a separate question.
+- Voice messages cannot delete anything.
+- Past diary entries cannot be changed, diary entries cannot be rewritten, and
+  diary notes cannot be deleted from chat.
+- A note open in the editor with unsaved changes is never written to; the
+  assistant says which note it could not touch.
+
+The browser keeps the chat history and sends it with each message, so the
+backend stores no conversation state. "New conversation" clears it.
+
+### Audio storage before deploying
+
+Recordings are saved on local disk under `backend/audio_files/<user id>/`. **This
+must move to object storage (for example S3 or Cloudflare R2) before deploying to
+Render:** Render's disk is ephemeral and is wiped on every deploy and restart,
+which would lose every recording while the notes still point at them. Only the
+transcript is embedded and searchable; the audio file is for playback.
 
 ## API
 
-Every memory endpoint requires `user_id`, a UUID. A missing or malformed id is
-rejected with HTTP 422. These examples work in Windows PowerShell 5.1 and PowerShell 7:
+Every endpoint except `/health` and the signed audio link requires the
+`X-User-Id` header with a UUID; a missing or malformed one is rejected with 422.
 
 ```powershell
-$u = [guid]::NewGuid().ToString()
+$h = @{ 'X-User-Id' = [guid]::NewGuid().ToString() }
 
-# Health (no user id: it reads no user data)
-curl.exe http://localhost:8000/health
-
-# List and clear one user's memories
-curl.exe "http://localhost:8000/memories?user_id=$u"
-curl.exe -X DELETE "http://localhost:8000/memories?user_id=$u"
-
-# Chat (streams). The JSON body is piped in on stdin, which avoids
-# PowerShell 5.1 stripping the quotes out of command-line arguments.
-@{ message = 'What do you remember about me?'; user_id = $u } | ConvertTo-Json -Compress |
-  curl.exe -N -X POST http://localhost:8000/chat -H "Content-Type: application/json" --data-binary '@-'
+Invoke-RestMethod http://localhost:8000/health
+Invoke-RestMethod http://localhost:8000/notes -Method Post -Headers $h -ContentType 'application/json' `
+  -Body (@{ type = 'list'; title = 'Groceries'; body = "milk`nbread" } | ConvertTo-Json)
+Invoke-RestMethod http://localhost:8000/notes -Headers $h
+Invoke-RestMethod http://localhost:8000/notes/search -Method Post -Headers $h -ContentType 'application/json' `
+  -Body (@{ query = 'shopping' } | ConvertTo-Json)
 ```
 
-`POST /chat` streams newline-delimited JSON, one event per line:
+| Method and path | What it does |
+|---|---|
+| `GET /health` | Which dependency is failing, if any |
+| `GET /notes?type=` | Your notes, most recently edited first |
+| `POST /notes/search` | Similarity search (JSON body, so search text stays out of logs) |
+| `POST /notes` | Create (diary: appends to today's entry if there is one) |
+| `GET /notes/{id}` | One note, with a signed `audio_url` for audio notes |
+| `PUT /notes/{id}` | Edit. Send `expected_updated` to get a 409 instead of overwriting newer changes |
+| `POST /notes/{id}/append` | Add text to the end |
+| `POST /notes/{id}/undo` | Swap back to the previous body |
+| `DELETE /notes/{id}` | Move to the trash |
+| `GET /trash` | Deleted notes |
+| `POST /trash/{id}/restore` | Restore from the trash |
+| `DELETE /trash/{id}` | Delete permanently |
+| `POST /notes/audio` | Upload a recording; transcribed and saved as an audio note |
+| `GET /notes/{id}/audio?expires=&sig=` | Play a recording (signed link, no header) |
+| `POST /transcribe` | Voice input for chat; returns text only |
+| `POST /chat` | One assistant turn, streamed as newline-delimited JSON |
 
-```
-{"type": "memories", "memories": [...]}   memories retrieved for this message
-{"type": "token", "content": "..."}        part of the reply
-{"type": "done", "reply": "..."}           reply finished
-{"type": "stored", "count": 2}             exchange saved to memory
-{"type": "error", "message": "...", "hint": "..."}   generation or saving failed
-```
-
-Errors always have the same shape, and never contain a traceback:
+Errors always look like this and never contain a traceback:
 
 ```json
 {"error": "service_unavailable",
- "problems": [{"service": "ollama",
-               "message": "Ollama is not running at http://localhost:11434",
-               "hint": "Start the Ollama app, or run: ollama serve"}]}
+ "problems": [{"service": "groq", "message": "Groq is rate limiting requests",
+               "hint": "Try again in about 17 seconds."}]}
 ```
-
-| Status | `error` | When |
-|---|---|---|
-| 503 | `service_unavailable` | Qdrant or Ollama is down, or a model is not pulled |
-| 422 | `invalid_request` | `user_id` missing or not a UUID, or an empty message |
-| 500 | `internal_error` | A bug; the traceback is in the backend window only |
-
-`/chat` needs everything. `/memories` needs only Qdrant once the backend has
-talked to Ollama once, so the memory list keeps working if Ollama stops later.
 
 ## Troubleshooting
 
-The red banner at the top of the app names the problem. Find it below.
+The banner at the top of the app names the problem. Find it below, fix it, then
+click **Check again** in the status popover.
 
 ### "Qdrant is not reachable at http://localhost:6333"
 
-- Docker Desktop is not running: start it, wait until it says running, then
-  `docker compose up -d` from `knowledge\mem0\docker`.
-- The container is stopped: `docker ps -a --filter name=qdrant` shows `Exited`.
-  Run `docker compose up -d` from `knowledge\mem0\docker`.
-- Something else is using port 6333:
-  `Get-NetTCPConnection -LocalPort 6333 -State Listen | Select-Object OwningProcess`.
+Docker Desktop is not running, or the container is stopped
+(`docker ps -a --filter name=qdrant` shows `Exited`). Start Docker Desktop, then
+run `docker compose up -d` from `knowledge\mem0\docker`.
 
-Then click **Check again** in the status popover.
+### "GROQ_API_KEY is not set"
 
-### "Ollama is not running at http://localhost:11434"
+Add `GROQ_API_KEY=...` to `memory-app\backend\.env`, then restart the backend.
 
-- Start the Ollama app, or run `ollama serve`.
-- If `ollama serve` says the address is already in use, Ollama is already
-  running; check `curl.exe http://localhost:11434/api/version`.
-- If Ollama runs on a different address, set `OLLAMA_BASE_URL` in `backend/.env`
-  and restart the backend.
+### "Groq rejected the API key"
 
-### "Model llama3.2:3b is not pulled" (or nomic-embed-text)
+The key is wrong or revoked. Create a new one at https://console.groq.com/keys,
+put it in `.env`, and restart the backend.
 
-- Run the `ollama pull ...` command shown in the banner, then **Check again**.
-- `ollama list` shows what is installed. The name in `backend/.env` must match
-  it (`nomic-embed-text` matches `nomic-embed-text:latest`).
+### "Groq is unreachable"
+
+No internet connection, or Groq is down. Notes, search and the trash still work;
+only the assistant, audio notes and voice input need Groq.
+
+### "Groq is rate limiting requests"
+
+Groq's free tier limits tokens per minute (8,000 for gpt-oss-120b on the account
+this was built with). One assistant reply can use a large share of that. Short
+waits (10 seconds or less) are retried automatically, and the reply says so;
+longer ones end with this message and the wait time. To use fewer tokens, keep
+`CHAT_REASONING_EFFORT=low` and lower `CHAT_SEARCH_LIMIT`.
+
+### "Model ... is not available on Groq"
+
+Groq retires models. The backend log lists the models your key can use; set
+`GROQ_CHAT_MODEL` (it must support tool calling) or `GROQ_TRANSCRIBE_MODEL` in
+`.env` and restart. `llama-3.3-70b-versatile` is no longer available, which is
+why the default is `openai/gpt-oss-120b`.
+
+### "The embedding model could not be loaded"
+
+It downloads from Hugging Face the first time; check your connection. If the
+download was interrupted, delete `backend\.model_cache` and restart.
 
 ### "The backend is not running"
 
-- Start it (step 3). If uvicorn says port 8000 is already in use, find what
-  holds it: `Get-NetTCPConnection -LocalPort 8000 -State Listen | Select-Object OwningProcess`.
-- If uvicorn exits at startup, the error is in that window. The most common
-  cause is a missing package: rerun the `pip install -r requirements.txt` line.
+Start it (step 2). If uvicorn says port 8000 is in use:
+`Get-NetTCPConnection -LocalPort 8000 -State Listen | Select-Object OwningProcess`.
 
 ### "The backend hit an unexpected error"
 
-A bug rather than a stopped service. The full traceback is printed in the
-backend's PowerShell window; the UI deliberately does not show it.
+A bug. The traceback is in the backend's PowerShell window; the app never shows it.
 
-### "The request is missing or has an invalid user_id"
+### "Microphone access is blocked"
 
-The ID in this browser's storage was edited or corrupted. Clear site data for
-localhost:5173 to get a new ID (this starts an empty history).
+Allow the microphone for localhost:5173 in the browser's address bar, then try again.
 
-### Other things that look like errors but are not
+### "... was changed since you opened it"
 
-- **Saving to memory takes one to two minutes.** After each reply, mem0 sends a
-  long extraction prompt to the chat model, which is slow on CPU. A new message
-  sent meanwhile waits behind it, because Ollama handles one request at a time.
-- **The status check takes about two seconds when a service is down.** On
-  Windows, a connection to a closed port takes about two seconds to fail.
-- **The page loads with no styling.** Stop the frontend (Ctrl+C) and run
-  `npm run dev` again.
+The assistant (or another tab) edited the note while it was open. Your edits
+are still on screen; copy anything you need, then load the latest version.
 
-## Notes
+## Tests
 
-- mem0 API in the installed version (2.1.0): `search()` and `get_all()` take
-  `filters={"user_id": ...}` and `top_k` (not `limit`); `add()` and
-  `delete_all()` take `user_id=` directly.
-- mem0's Ollama embedder contacts Ollama when it starts, and would download the
-  embedding model if it were missing. The backend checks for the model first
-  and reports it instead, so nothing is downloaded without you running `ollama pull`.
-- **No conversation history is sent to the model**, same as the demo: each reply
-  sees only the current message and the retrieved memories.
+With the backend running:
+
+```powershell
+Set-Location C:\Users\azwad\Downloads\ai-cookbook\memory-app\backend
+
+# Isolation, header-only identity, undo, diary and trash (Git Bash required for this one)
+& "C:\Program Files\Git\bin\bash.exe" -c "cd /c/Users/azwad/Downloads/ai-cookbook && PY=.venv/Scripts/python.exe bash memory-app/backend/tests/curl_checks.sh"
+
+# Chat rules enforced in code, with a scripted fake model (no Groq tokens used)
+..\..\.venv\Scripts\python.exe tests\chat_rules_test.py
+
+# Real conversations with the real model (uses Groq tokens, takes a few minutes)
+..\..\.venv\Scripts\python.exe tests\chat_live.py
+```
+
+Each test uses throwaway user IDs and deletes everything it created.

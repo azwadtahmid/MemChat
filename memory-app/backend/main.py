@@ -46,5 +46,6 @@ async def get_health():
             "transcribe_model": settings.groq_transcribe_model,
             "embed_model": settings.embed_model,
             "collection": settings.notes_collection,
+            "trash_retention_days": settings.trash_retention_days,
         },
     }

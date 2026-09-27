@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# The repo root ignores lib/ (a Python rule); this lib/ is app source.
+!src/lib/

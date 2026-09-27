@@ -227,7 +227,7 @@ async def get_audio(note_id: str, expires: Annotated[int, Query()], sig: Annotat
 @router.post("/transcribe")
 async def transcribe(user_id: UserId, file: Annotated[UploadFile, File()]):
     """Voice input for the chat: returns text only and stores nothing."""
-    await health.require(health.GROQ)
+    await health.require(*health.TRANSCRIBE)
     suffix, data = await _read_audio(file)
-    text = await health.run((health.GROQ,), groq_client.transcribe, f"voice{suffix}", data)
+    text = await health.run(health.TRANSCRIBE, groq_client.transcribe, f"voice{suffix}", data)
     return {"text": text}
