@@ -439,12 +439,16 @@ svg {
   animation: breathe 1.4s ease-in-out infinite;
 }
 
+/* Rendered into <body> and placed by Rail.tsx, so nothing can clip it. Hidden
+   until placed, sized to its content, never wider than the viewport. */
 .popover {
-  position: absolute;
-  left: 16px;
-  bottom: calc(100% + 8px);
+  position: fixed;
   z-index: var(--z-popover);
-  width: min(340px, calc(100vw - 32px));
+  visibility: hidden;
+  width: max-content;
+  max-width: min(26rem, calc(100vw - 16px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 18px 18px 12px;
   background: var(--washi-raise);
   border: 1px solid var(--ink-edge);
@@ -2148,13 +2152,6 @@ svg {
     grid-area: status;
     margin: 0;
     padding: 0 12px 0 0;
-  }
-
-  .popover {
-    left: auto;
-    right: 12px;
-    bottom: auto;
-    top: calc(100% + 4px);
   }
 
   .rail-group {

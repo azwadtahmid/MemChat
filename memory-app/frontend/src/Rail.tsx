@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { identity, type Health, type NoteType, type Problem } from './api'
 import { AllIcon, DiaryIcon, LogoMark, NotesIcon, TrashIcon } from './icons'
 import { TYPE_LABEL } from './lib/format'
@@ -62,6 +63,7 @@ export default function Rail({ tab, onTab, filter, onFilter, health, problems, c
   const [open, setOpen] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
   const buttonRef = useRef<HTMLButtonElement>(null)
+  const popoverRef = useRef<HTMLDivElement>(null)
 
   const state = checking && !health ? 'checking' : problems.length > 0 ? 'down' : 'up'
   const label = state === 'checking' ? 'checking' : state === 'down' ? `unavailable (${problems.length})` : 'connected'
@@ -76,7 +78,9 @@ export default function Rail({ tab, onTab, filter, onFilter, health, problems, c
       }
     }
     function onPointer(e: PointerEvent) {
-      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false)
+      const target = e.target as Node
+      // The popover is portalled out of the rail, so it is checked separately.
+      if (!wrapRef.current?.contains(target) && !popoverRef.current?.contains(target)) setOpen(false)
     }
     document.addEventListener('keydown', onKey)
     document.addEventListener('pointerdown', onPointer)
@@ -85,6 +89,55 @@ export default function Rail({ tab, onTab, filter, onFilter, health, problems, c
       document.removeEventListener('pointerdown', onPointer)
     }
   }, [open])
+
+  // The popover is rendered into <body> with fixed positioning, because the
+  // rail scrolls and would clip it. Beside a vertical rail it opens to the
+  // rail's right, level with the button, so it covers none of the rail's
+  // navigation; from the top bar it opens towards whichever side of the button
+  // has more room. It stays 8px inside the viewport and scrolls within itself
+  // if it is ever taller than the room it has. Placed by writing styles
+  // directly, so measuring it costs no extra render.
+  const place = useCallback(() => {
+    const button = buttonRef.current?.getBoundingClientRect()
+    const rail = buttonRef.current?.closest('.rail')?.getBoundingClientRect()
+    const pop = popoverRef.current
+    if (!button || !rail || !pop) return
+    const margin = 8
+    const gap = 6
+    const vw = document.documentElement.clientWidth
+    const vh = window.innerHeight
+    // The CSS cap uses 100vw, which counts the scrollbar; this one does not.
+    pop.style.maxWidth = `min(26rem, ${vw - 2 * margin}px)`
+    const width = pop.offsetWidth
+    if (rail.height > vh / 2 && rail.right + gap + width <= vw - margin) {
+      const bottom = Math.max(margin, vh - button.bottom)
+      pop.style.left = `${rail.right + gap}px`
+      pop.style.top = ''
+      pop.style.bottom = `${bottom}px`
+      pop.style.maxHeight = `${vh - bottom - margin}px`
+      pop.style.visibility = 'visible'
+      return
+    }
+    const above = button.top - gap - margin
+    const below = vh - button.bottom - gap - margin
+    const up = above >= below
+    pop.style.maxHeight = `${Math.max(0, up ? above : below)}px`
+    pop.style.top = up ? '' : `${button.bottom + gap}px`
+    pop.style.bottom = up ? `${vh - button.top + gap}px` : ''
+    pop.style.left = `${Math.max(margin, Math.min(button.left, vw - width - margin))}px`
+    pop.style.visibility = 'visible'
+  }, [])
+
+  useLayoutEffect(() => {
+    if (!open) return
+    place()
+    window.addEventListener('resize', place)
+    window.addEventListener('scroll', place, true)
+    return () => {
+      window.removeEventListener('resize', place)
+      window.removeEventListener('scroll', place, true)
+    }
+  }, [open, place, health, problems, checking])
 
   return (
     <header className="rail">
@@ -150,64 +203,72 @@ export default function Rail({ tab, onTab, filter, onFilter, health, problems, c
           {label}
         </button>
 
-        {open && (
-          <div className="popover" id="status-popover" role="dialog" aria-label="Connection details">
-            <dl className="details">
-              <dt>User</dt>
-              <dd>{identity.id}</dd>
-              {health && (
-                <>
-                  <dt>Collection</dt>
-                  <dd>{health.config.collection}</dd>
-                </>
-              )}
-            </dl>
-            <div className="health">
-              <h2>Backend health</h2>
-              {health ? (
-                <dl className="details">
-                  {SERVICE_ROWS.map((row) => (
-                    <div key={row.key} className="details-row">
-                      <dt>{row.label(health)}</dt>
-                      <dd>{row.states[health.services[row.key]] ?? health.services[row.key]}</dd>
-                    </div>
-                  ))}
-                </dl>
-              ) : (
-                <p>{checking ? 'Checking.' : 'The backend did not answer the health check.'}</p>
-              )}
-              {problems.length > 0 && (
-                <ul className="problem-list">
-                  {problems.map((p) => (
-                    <li key={p.message}>
-                      {p.message}
-                      {p.hint && <span className="banner-hint">{p.hint}</span>}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-            <p className="muted">
-              {identity.persisted
-                ? "Your notes are stored under this ID, kept in this browser's storage. Clearing site data for this page starts a new, empty set of notes."
-                : 'This browser is blocking site storage, so this ID and its notes last only until the page is reloaded.'}
-            </p>
-            <div className="popover-actions">
-              <button type="button" className="text-button" onClick={onRecheck} disabled={checking}>
-                {checking ? 'Checking' : 'Check again'}
-              </button>
-              <button
-                type="button"
-                className="text-button"
-                onClick={() => {
-                  setOpen(false)
-                  onPrivacy()
-                }}
-              >
-                Privacy
-              </button>
-            </div>
-          </div>
+        {open &&
+          createPortal(
+            <div
+              ref={popoverRef}
+              className="popover"
+              id="status-popover"
+              role="dialog"
+              aria-label="Connection details"
+            >
+              <dl className="details">
+                <dt>User</dt>
+                <dd>{identity.id}</dd>
+                {health && (
+                  <>
+                    <dt>Collection</dt>
+                    <dd>{health.config.collection}</dd>
+                  </>
+                )}
+              </dl>
+              <div className="health">
+                <h2>Backend health</h2>
+                {health ? (
+                  <dl className="details">
+                    {SERVICE_ROWS.map((row) => (
+                      <div key={row.key} className="details-row">
+                        <dt>{row.label(health)}</dt>
+                        <dd>{row.states[health.services[row.key]] ?? health.services[row.key]}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                ) : (
+                  <p>{checking ? 'Checking.' : 'The backend did not answer the health check.'}</p>
+                )}
+                {problems.length > 0 && (
+                  <ul className="problem-list">
+                    {problems.map((p) => (
+                      <li key={p.message}>
+                        {p.message}
+                        {p.hint && <span className="banner-hint">{p.hint}</span>}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+              <p className="muted">
+                {identity.persisted
+                  ? "Your notes are stored under this ID, kept in this browser's storage. Clearing site data for this page starts a new, empty set of notes."
+                  : 'This browser is blocking site storage, so this ID and its notes last only until the page is reloaded.'}
+              </p>
+              <div className="popover-actions">
+                <button type="button" className="text-button" onClick={onRecheck} disabled={checking}>
+                  {checking ? 'Checking' : 'Check again'}
+                </button>
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={() => {
+                    setOpen(false)
+                    onPrivacy()
+                  }}
+                >
+                  Privacy
+                </button>
+              </div>
+            </div>,
+            document.body,
         )}
       </div>
     </header>
