@@ -1,17 +1,21 @@
-# Introduction
+# MemChat
 
-This Cookbook contains examples and tutorials to help developers build AI systems with copy/paste code snippets that you can easily integrate into your own projects.
+**The project in this repository is [`memory-app/`](memory-app/).** Start with
+[`memory-app/README.md`](memory-app/README.md) for what it is, how it is
+deployed, and how to run it locally.
 
-## About me
+MemChat is a notes app with an assistant that answers from your notes first:
+text notes, checklists, a daily diary, tags, pins and date filtering, with a
+chat panel that can search and add to them. It runs on Vercel, Render, Qdrant
+Cloud and Groq.
 
-I'm Dave, an AI engineer and founder of Datalumina. I run an AI development company, and on my [YouTube channel](https://www.youtube.com/@daveebbelaar?sub_confirmation=1), I share practical tutorials that teach you how to build AI systems that actually work in the real world.
+**Live:** https://mem-chat.vercel.app (the backend sleeps when idle, so the
+first request can take up to 50 seconds)
 
-### My other work
+## The rest of this repository
 
-Beyond this cookbook, I've created a few other resources that might help you depending on where you are in your career.
-
-If you're completely new to AI and just getting started with Python, I have a [free five-hour course](https://youtu.be/ygXn5nV5qFc) that covers everything you need to know to build a solid foundation.
-
-If you're already comfortable with the basics and want to go deeper, I run a program where I teach developers [how to build and deploy end-to-end GenAI solutions](https://go.datalumina.com/CkIsMAK) using the same approach we use for our agency clients.
-
-And if you're a skilled developer or data professional looking to go independent, I can help you [land your first client](https://go.datalumina.com/MVWhVn9).
+Everything outside `memory-app/` comes from the
+[AI Cookbook](https://github.com/daveebbelaar/ai-cookbook) by Dave Ebbelaar,
+which this repository was forked from: examples and tutorials for building AI
+systems. MemChat uses one piece of it directly, the Qdrant Docker setup in
+`knowledge/mem0/docker/`, for local development.

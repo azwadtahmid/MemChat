@@ -11,7 +11,9 @@ class Settings(BaseSettings):
     # Read backend/.env regardless of which directory uvicorn is started from.
     # Unknown keys (such as the old OLLAMA_* and QDRANT_COLLECTION lines from the
     # mem0 version) are ignored.
-    model_config = SettingsConfigDict(env_file=BACKEND_DIR / ".env", extra="ignore")
+    # A blank value (VAR=) means "use the default", so .env.example can be
+    # copied as it is.
+    model_config = SettingsConfigDict(env_file=BACKEND_DIR / ".env", extra="ignore", env_ignore_empty=True)
 
     # ---------- Groq ----------
     groq_api_key: SecretStr = SecretStr("")
