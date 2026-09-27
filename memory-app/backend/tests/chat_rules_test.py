@@ -239,6 +239,59 @@ r = turn(A, [rejected_tool_call(), rejected_tool_call()], message="list my notes
 check("  ...and if it fails again, a readable message",
       [e["message"] for e in r["events"] if e["type"] == "error"], ["The assistant made an invalid request"])
 
+print("\n== Tags, pins and date ranges")
+C = str(uuid.uuid4())
+H = {"X-User-Id": C, "X-Client-Date": TODAY.isoformat()}
+work = client.post("/notes", json={"type": "text", "title": "Quarterly plan", "body": "Hire two engineers",
+                                   "tags": ["#Work", " work ", "Planning"]}, headers=H).json()["note"]
+check("tags are lowercased, trimmed, de-duplicated", work["tags"], ["work", "planning"])
+home = note(C, "text", "Garden", "Plant tulip bulbs")
+check("a note without tags reads as untagged and unpinned", (home["tags"], home["pinned"]), ([], False))
+r = client.post("/notes/list", json={"tags": ["work"]}, headers=H).json()["notes"]
+check("filtering by tag is an exact lookup", [n["title"] for n in r], ["Quarterly plan"])
+r = client.post("/notes/list", json={"tags": ["work", "garden"]}, headers=H).json()["notes"]
+check("several tags must all be present", r, [])
+
+before = client.get(f"/notes/{home['id']}", headers=H).json()["note"]["updated"]
+tagged = client.put(f"/notes/{home['id']}/tags", json={"tags": ["Home"]}, headers=H).json()["note"]
+pinned = client.put(f"/notes/{home['id']}/pin", json={"pinned": True}, headers=H).json()["note"]
+check("tags and pin are saved", (tagged["tags"], pinned["pinned"]), (["home"], True))
+check("tagging and pinning leave updated alone", pinned["updated"], before)
+store.update(C, work["id"], body="Hire two engineers and a designer")  # now the newest
+r = client.get("/notes", headers=H).json()["notes"]
+check("pinned notes sort first, even when older", [n["title"] for n in r], ["Garden", "Quarterly plan"])
+r = client.post("/notes/search", json={"query": "flowers"}, headers=H).json()["notes"]
+check("search results keep the pinned flag", r[0]["pinned"], True)
+
+# Backdate one note to August to exercise the created-date range.
+store.client().set_payload(store.COLLECTION, payload={"created": "2026-08-14T10:00:00+00:00"}, points=[home["id"]])
+aug = {"created_from": "2026-08-01T00:00:00+00:00", "created_to": "2026-09-01T00:00:00+00:00"}
+r = client.post("/notes/search", json={"query": "gardening", **aug}, headers=H).json()["notes"]
+check("a date range narrows the similarity search", [n["title"] for n in r], ["Garden"])
+r = client.post("/notes/list", json=aug, headers=H).json()["notes"]
+check("the same range narrows the plain list", [n["title"] for n in r], ["Garden"])
+r = client.post("/notes/list", json={"created_from": aug["created_to"], "created_to": aug["created_from"]}, headers=H)
+check("a backwards range is refused", r.status_code, 400)
+
+r = turn(C, [call("search_notes", query="what was I thinking about", date_from="2026-08-01", date_to="2026-08-31"),
+             text("x")], message="what was I thinking about in August?")
+check("chat search_notes takes date_from and date_to", [x["title"] for x in r["tool_results"][0]["results"]], ["Garden"])
+r = turn(C, [call("list_notes", tags=["work"]), text("x")], message="list my work notes")
+check("chat list_notes takes a tag filter", [x["title"] for x in r["tool_results"][0]["notes"]], ["Quarterly plan"])
+r = turn(C, [call("create_note", type="text", title="Standup", body="Ship tags", tags=["Work", "meetings"]), text("x")],
+         message="note: ship tags, tag it work and meetings")
+check("chat can add tags when creating a note", r["tool_results"][0]["note"]["tags"], ["work", "meetings"])
+r = turn(C, [call("update_note", note_id=work["id"], body="x", tags=[]), text("x")], message="remove the tags")
+check("chat cannot pass tags to update_note", "error" in r["tool_results"][0], True)
+check("so the tags survive", store.get(C, work["id"])["tags"], ["work", "planning"])
+r = turn(C, [call("pin_note", note_id=work["id"]), text("x")], message="pin it")
+check("chat has no pin tool", r["tool_results"][0], {"error": "Unknown tool pin_note"})
+names = {s["function"]["name"] for s in __import__("chat.tools", fromlist=["SCHEMAS"]).SCHEMAS}
+check("no tool can remove tags or pin", sorted(n for n in names if "tag" in n or "pin" in n), [])
+for n in store.list_notes(C):
+    store.soft_delete(C, n["id"])
+    store.purge(C, n["id"])
+
 print("\n== Answer format")
 r = turn(A, [text("From general knowledge: boil it for about 5–6 minutes.")], message="how long to boil an egg?")
 check("a general-only answer opens with the nothing-in-notes line",

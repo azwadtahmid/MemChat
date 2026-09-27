@@ -49,6 +49,12 @@ def conflict(title: str) -> AppError:
     )
 
 
+def audio_unavailable() -> AppError:
+    return AppError(501, "audio_unavailable", [Problem(
+        "audio", "Audio notes are not available in the hosted version yet",
+        "Recordings cannot be stored here, so none is taken. Write a text note instead.")])
+
+
 def bad_request(message: str) -> AppError:
     return AppError(400, "bad_request", [Problem("notes", message)])
 

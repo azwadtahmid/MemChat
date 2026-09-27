@@ -7,7 +7,12 @@ purge_expired(), which only deletes.
 One point per note. Payload:
   user_id, type, title, body, created, updated,
   deleted, deleted_at, previous_body, audio_path (audio notes),
-  entry_date (diary notes: the calendar day the entry belongs to)
+  entry_date (diary notes: the calendar day the entry belongs to),
+  tags (lowercase strings), pinned, pinned_at
+
+Tags and pinning are metadata: changing them neither re-embeds the note nor
+moves its "updated" time, so an open editor never sees them as a conflict.
+Notes written before tags and pinning existed read as untagged and unpinned.
 """
 
 import logging
@@ -72,6 +77,9 @@ def ensure_collection() -> None:
             ("deleted", models.PayloadSchemaType.BOOL),
             ("deleted_at", models.PayloadSchemaType.DATETIME),
             ("entry_date", models.PayloadSchemaType.KEYWORD),
+            ("tags", models.PayloadSchemaType.KEYWORD),
+            ("pinned", models.PayloadSchemaType.BOOL),
+            ("created", models.PayloadSchemaType.DATETIME),
         ):
             c.create_payload_index(COLLECTION, field, field_schema=schema)
         _ready = True
@@ -106,7 +114,42 @@ def _owner_filter(user_id: str, *, deleted: bool | None = False, note_type: str 
 
 
 def _note(point_id, payload: dict) -> dict:
-    return {"id": str(point_id), **payload}
+    return {"id": str(point_id), "tags": [], "pinned": False, **payload}
+
+
+MAX_TAGS = 20
+MAX_TAG_LENGTH = 32
+
+
+def normalize_tags(tags: list[str] | None) -> list[str]:
+    """Lowercase, trimmed, no leading #, single spaces, no duplicates, in order."""
+    out: list[str] = []
+    for raw in tags or []:
+        tag = " ".join(str(raw).strip().lstrip("#").lower().split())
+        if not tag:
+            continue
+        if len(tag) > MAX_TAG_LENGTH:
+            raise bad_request(f"Tags can be at most {MAX_TAG_LENGTH} characters")
+        if tag not in out:
+            out.append(tag)
+    if len(out) > MAX_TAGS:
+        raise bad_request(f"A note can carry at most {MAX_TAGS} tags")
+    return out
+
+
+def _as_utc(moment: datetime) -> datetime:
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def _narrow(tags: list[str] | None, created_from: datetime | None, created_to: datetime | None) -> list[models.Condition]:
+    """Exact payload filters: every tag must be present; created in [from, to)."""
+    conditions: list[models.Condition] = [_match("tags", t) for t in normalize_tags(tags)]
+    if created_from or created_to:
+        conditions.append(models.FieldCondition(key="created", range=models.DatetimeRange(
+            gte=_as_utc(created_from) if created_from else None,
+            lt=_as_utc(created_to) if created_to else None,
+        )))
+    return conditions
 
 
 def _point(user_id: str, note_id: str, *, include_deleted: bool = False) -> models.Record:
@@ -158,17 +201,26 @@ def get(user_id: str, note_id: str, *, include_deleted: bool = False) -> dict:
     return _note(p.id, p.payload)
 
 
-def list_notes(user_id: str, note_type: str | None = None, *, deleted: bool = False) -> list[dict]:
-    notes = [_note(p.id, p.payload) for p in _scroll(_owner_filter(user_id, deleted=deleted, note_type=note_type))]
+def list_notes(user_id: str, note_type: str | None = None, *, deleted: bool = False, tags: list[str] | None = None,
+               created_from: datetime | None = None, created_to: datetime | None = None) -> list[dict]:
+    flt = _owner_filter(user_id, deleted=deleted, note_type=note_type, extra=_narrow(tags, created_from, created_to))
+    notes = [_note(p.id, p.payload) for p in _scroll(flt)]
     key = "deleted_at" if deleted else "updated"
-    return sorted(notes, key=lambda n: n.get(key) or "", reverse=True)
+    notes.sort(key=lambda n: n.get(key) or "", reverse=True)
+    if not deleted:
+        notes.sort(key=lambda n: not n.get("pinned"))  # stable: pinned first, each group newest first
+    return notes
 
 
-def search(user_id: str, query: str, note_type: str | None = None, limit: int | None = None) -> list[dict]:
+def search(user_id: str, query: str, note_type: str | None = None, limit: int | None = None, *,
+           tags: list[str] | None = None, created_from: datetime | None = None,
+           created_to: datetime | None = None) -> list[dict]:
+    """Similarity search, narrowed by exact payload filters in the same query."""
     result = client().query_points(
         COLLECTION,
         query=embeddings.embed_query(query),
-        query_filter=_owner_filter(user_id, deleted=False, note_type=note_type),
+        query_filter=_owner_filter(user_id, deleted=False, note_type=note_type,
+                                   extra=_narrow(tags, created_from, created_to)),
         limit=limit or settings.search_limit,
         with_payload=True,
     )
@@ -205,20 +257,25 @@ def _write(point: models.Record, *, title: str | None = None, body: str | None =
 
 
 def create(user_id: str, note_type: str, title: str, body: str, *, today: date,
-           note_id: str | None = None, audio_path: str | None = None) -> tuple[dict, bool]:
+           note_id: str | None = None, audio_path: str | None = None,
+           tags: list[str] | None = None) -> tuple[dict, bool]:
     """Create a note. Returns (note, appended_to_existing).
 
     Diary notes are one per day: if today's entry exists, the text is appended
-    to it instead, and diary titles are always the date.
+    to it instead (and any new tags are added to it), and diary titles are
+    always the date.
     """
     if note_type not in NOTE_TYPES:
         raise bad_request(f"Unknown note type {note_type!r}")
+    tags = normalize_tags(tags)
     extra: dict = {}
     if note_type == "diary":
         if existing := today_diary(user_id, today):
-            if not body.strip():
-                return existing, True
-            return append(user_id, existing["id"], body), True
+            if body.strip():
+                existing = append(user_id, existing["id"], body)
+            if tags:
+                existing = add_tags(user_id, existing["id"], tags)
+            return existing, True
         title = diary_title(today)
         extra["entry_date"] = today.isoformat()
     if note_type == "list" and body.strip():
@@ -230,6 +287,7 @@ def create(user_id: str, note_type: str, title: str, body: str, *, today: date,
     payload = {
         "user_id": user_id, "type": note_type, "title": title, "body": body,
         "created": ts, "updated": ts, "deleted": False, "deleted_at": None, "previous_body": None,
+        "tags": tags, "pinned": False, "pinned_at": None,
         **extra,
     }
     point_id = note_id or str(uuid.uuid4())
@@ -265,6 +323,27 @@ def undo(user_id: str, note_id: str) -> dict:
     if point.payload.get("previous_body") is None:
         raise bad_request("There is nothing to undo for this note")
     return _write(point, body=point.payload["previous_body"])
+
+
+def set_tags(user_id: str, note_id: str, tags: list[str]) -> dict:
+    """Replace a note's tags. Metadata only: no re-embed, "updated" unchanged."""
+    point = _point(user_id, note_id)
+    patch = {"tags": normalize_tags(tags)}
+    client().set_payload(COLLECTION, payload=patch, points=[point.id])
+    return _note(point.id, {**point.payload, **patch})
+
+
+def add_tags(user_id: str, note_id: str, tags: list[str]) -> dict:
+    """Add tags, keeping every existing one. The only tag write the assistant has."""
+    point = _point(user_id, note_id)
+    return set_tags(user_id, note_id, list(point.payload.get("tags") or []) + list(tags))
+
+
+def set_pinned(user_id: str, note_id: str, pinned: bool) -> dict:
+    point = _point(user_id, note_id)
+    patch = {"pinned": pinned, "pinned_at": now_iso() if pinned else None}
+    client().set_payload(COLLECTION, payload=patch, points=[point.id])
+    return _note(point.id, {**point.payload, **patch})
 
 
 def soft_delete(user_id: str, note_id: str) -> dict:

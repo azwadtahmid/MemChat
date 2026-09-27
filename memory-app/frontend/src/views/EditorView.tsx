@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, API_BASE, localDate, ServiceError, type Note, type NoteType } from '../api'
 import Checklist from '../components/Checklist'
-import { BackIcon, CheckIcon, RestoreIcon, TrashIcon } from '../icons'
+import TagEditor from '../components/TagEditor'
+import { BackIcon, CheckIcon, PinIcon, RestoreIcon, TrashIcon } from '../icons'
 import { TypeBadge } from '../components/NoteCard'
 import { formatDate, formatDateTime } from '../lib/format'
 
@@ -35,6 +36,7 @@ export default function EditorView({
   const [conflict, setConflict] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [confirmTrash, setConfirmTrash] = useState(false)
+  const [metaBusy, setMetaBusy] = useState(false)
 
   const type = note?.type ?? newType
   const isNew = noteId === null
@@ -145,6 +147,24 @@ export default function EditorView({
     }
   }
 
+  // Tags and pinning save at once and never touch the draft: the backend leaves
+  // "updated" alone for them, so a later save does not see a conflict.
+  async function changeMeta(write: () => Promise<Note>) {
+    setMetaBusy(true)
+    setError(null)
+    try {
+      const saved = await write()
+      touched.current = true
+      setNote((current) => (current ? { ...current, tags: saved.tags, pinned: saved.pinned } : saved))
+      onSaved(saved)
+    } catch (err) {
+      if (err instanceof ServiceError && err.status !== 503) setError(err.problems[0]?.message ?? 'Not saved.')
+      else onProblem(err)
+    } finally {
+      setMetaBusy(false)
+    }
+  }
+
   async function trash() {
     try {
       touched.current = true // deliberately trashed: do not also purge it
@@ -176,6 +196,18 @@ export default function EditorView({
           Back
         </button>
         <TypeBadge type={type} />
+        {note && (
+          <button
+            type="button"
+            className="text-button pin-toggle"
+            aria-pressed={!!note.pinned}
+            disabled={metaBusy}
+            onClick={() => void changeMeta(() => api.setPinned(note.id, !note.pinned))}
+          >
+            <PinIcon />
+            {note.pinned ? 'Pinned' : 'Pin'}
+          </button>
+        )}
         <span className="editor-status" aria-live="polite">
           {saving ? 'Saving' : dirty ? 'Unsaved changes' : isNew ? '' : 'Saved'}
         </span>
@@ -201,6 +233,14 @@ export default function EditorView({
         </p>
       )}
 
+      {note && (
+        <TagEditor
+          tags={note.tags ?? []}
+          busy={metaBusy}
+          onChange={(tags) => void changeMeta(() => api.setTags(note.id, tags))}
+        />
+      )}
+
       {conflict && (
         <div className="notice" role="alert">
           <p>This note was changed since you opened it, possibly by the assistant. Your edits are still here but were not saved.</p>
@@ -210,10 +250,14 @@ export default function EditorView({
         </div>
       )}
 
-      {type === 'audio' && note?.audio_url && (
-        // The URL carries a short-lived signed token, not the user id.
-        <audio className="audio-player" controls preload="metadata" src={`${API_BASE}${note.audio_url}`} />
-      )}
+      {type === 'audio' &&
+        note &&
+        (note.audio_url ? (
+          // The URL carries a short-lived signed token, not the user id.
+          <audio className="audio-player" controls preload="metadata" src={`${API_BASE}${note.audio_url}`} />
+        ) : (
+          <p className="muted">The recording was not kept. The transcript below is all that remains of it.</p>
+        ))}
 
       {type === 'list' && !rawList ? (
         <Checklist body={body} onChange={changeList} />

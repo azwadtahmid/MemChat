@@ -16,6 +16,7 @@ interface Props {
   problems: Problem[]
   checking: boolean
   onRecheck: () => void
+  onPrivacy: () => void
 }
 
 const TABS: { id: Tab; label: string; Icon: typeof NotesIcon }[] = [
@@ -57,7 +58,7 @@ function FilterGlyph({ filter }: { filter: Filter }) {
  * a rule the type filters. The active view carries the vermillion stroke; the
  * active filter full-strength ink and a hairline ink rule.
  */
-export default function Rail({ tab, onTab, filter, onFilter, health, problems, checking, onRecheck }: Props) {
+export default function Rail({ tab, onTab, filter, onFilter, health, problems, checking, onRecheck, onPrivacy }: Props) {
   const [open, setOpen] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
   const buttonRef = useRef<HTMLButtonElement>(null)
@@ -133,6 +134,9 @@ export default function Rail({ tab, onTab, filter, onFilter, health, problems, c
       </div>
 
       <div className="status" ref={wrapRef}>
+        <button type="button" className="rail-privacy" onClick={onPrivacy}>
+          How your notes are kept
+        </button>
         <button
           ref={buttonRef}
           type="button"
@@ -188,9 +192,21 @@ export default function Rail({ tab, onTab, filter, onFilter, health, problems, c
                 ? "Your notes are stored under this ID, kept in this browser's storage. Clearing site data for this page starts a new, empty set of notes."
                 : 'This browser is blocking site storage, so this ID and its notes last only until the page is reloaded.'}
             </p>
-            <button type="button" className="text-button" onClick={onRecheck} disabled={checking}>
-              {checking ? 'Checking' : 'Check again'}
-            </button>
+            <div className="popover-actions">
+              <button type="button" className="text-button" onClick={onRecheck} disabled={checking}>
+                {checking ? 'Checking' : 'Check again'}
+              </button>
+              <button
+                type="button"
+                className="text-button"
+                onClick={() => {
+                  setOpen(false)
+                  onPrivacy()
+                }}
+              >
+                Privacy
+              </button>
+            </div>
           </div>
         )}
       </div>

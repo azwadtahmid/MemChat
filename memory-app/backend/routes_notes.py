@@ -6,7 +6,7 @@ short-lived token in its URL, because <audio src> cannot send headers.
 """
 
 import uuid
-from datetime import date
+from datetime import date, datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, File, Form, Header, Query, UploadFile
@@ -17,7 +17,7 @@ import groq_client
 import health
 import store
 from config import settings
-from errors import AppError, Problem, bad_request, not_found
+from errors import AppError, Problem, audio_unavailable, bad_request, not_found
 from identity import UserId, audio_token_valid, audio_url
 
 router = APIRouter()
@@ -37,22 +37,36 @@ def client_today(x_client_date: Annotated[str | None, Header(alias="X-Client-Dat
 
 
 
+def _recording_exists(relative: str) -> bool:
+    try:
+        return store.audio_file(relative).exists()
+    except AppError:
+        return False
+
+
 def present(note: dict) -> dict:
     """What clients see: no owner id, no internal file path, undo as a flag."""
     out = {k: v for k, v in note.items() if k not in ("user_id", "audio_path", "previous_body")}
     out["has_undo"] = note.get("previous_body") is not None
     if note.get("type") == "audio" and note.get("audio_path") and not note.get("deleted"):
-        out["audio_url"] = audio_url(note["id"], note["user_id"])
+        # A recording lost with an ephemeral disk gets no link, so the editor can
+        # say so instead of showing a player that silently fails.
+        if _recording_exists(note["audio_path"]):
+            out["audio_url"] = audio_url(note["id"], note["user_id"])
     return out
 
 
 # ---------- Request bodies ----------
 
 
+Tags = Annotated[list[Annotated[str, Field(max_length=64)]], Field(max_length=store.MAX_TAGS)]
+
+
 class NoteIn(BaseModel):
     type: WritableType
     title: str = Field("", max_length=300)
     body: str = Field("", max_length=100_000)
+    tags: Tags = Field(default_factory=list)
 
 
 class NoteUpdate(BaseModel):
@@ -66,10 +80,30 @@ class AppendIn(BaseModel):
     text: str = Field(min_length=1, max_length=20_000)
 
 
-class SearchIn(BaseModel):
-    # A POST body rather than ?q=..., so search text stays out of access logs.
-    query: str = Field(min_length=1, max_length=500)
+class NoteFilters(BaseModel):
+    # A POST body rather than query parameters, so tags and search text stay out
+    # of URLs and access logs.
     type: NoteType | None = None
+    tags: Tags = Field(default_factory=list)  # a note must carry all of them
+    created_from: datetime | None = None  # inclusive
+    created_to: datetime | None = None  # exclusive
+
+    def range(self) -> dict:
+        if self.created_from and self.created_to and self.created_from >= self.created_to:
+            raise bad_request("The start of the date range must be before its end")
+        return {"tags": self.tags, "created_from": self.created_from, "created_to": self.created_to}
+
+
+class SearchIn(NoteFilters):
+    query: str = Field(min_length=1, max_length=500)
+
+
+class TagsIn(BaseModel):
+    tags: Tags
+
+
+class PinIn(BaseModel):
+    pinned: bool
 
 
 # ---------- Notes ----------
@@ -82,10 +116,20 @@ async def list_notes(user_id: UserId, type: NoteType | None = None):
     return {"notes": [present(n) for n in notes]}
 
 
+@router.post("/notes/list")
+async def list_notes_filtered(body: NoteFilters, user_id: UserId):
+    """The notes list narrowed by tags and a created-date range: exact filters, no similarity search."""
+    filters = body.range()
+    await health.require(*health.READ)
+    notes = await health.run(health.READ, store.list_notes, user_id, body.type, **filters)
+    return {"notes": [present(n) for n in notes]}
+
+
 @router.post("/notes/search")
 async def search_notes(body: SearchIn, user_id: UserId):
+    filters = body.range()
     await health.require(*health.WRITE)
-    notes = await health.run(health.WRITE, store.search, user_id, body.query, body.type)
+    notes = await health.run(health.WRITE, store.search, user_id, body.query, body.type, **filters)
     return {"notes": [present(n) for n in notes]}
 
 
@@ -94,7 +138,8 @@ async def create_note(body: NoteIn, user_id: UserId,
                       x_client_date: Annotated[str | None, Header(alias="X-Client-Date")] = None):
     await health.require(*health.WRITE)
     note, appended = await health.run(
-        health.WRITE, store.create, user_id, body.type, body.title, body.body, today=client_today(x_client_date)
+        health.WRITE, store.create, user_id, body.type, body.title, body.body,
+        today=client_today(x_client_date), tags=body.tags,
     )
     return {"note": present(note), "appended_to_existing": appended}
 
@@ -115,6 +160,18 @@ async def update_note(note_id: str, body: NoteUpdate, user_id: UserId):
         title=body.title, body=body.body, expected_updated=body.expected_updated,
     )
     return {"note": present(note)}
+
+
+@router.put("/notes/{note_id}/tags")
+async def set_tags(note_id: str, body: TagsIn, user_id: UserId):
+    await health.require(*health.READ)
+    return {"note": present(await health.run(health.READ, store.set_tags, user_id, note_id, body.tags))}
+
+
+@router.put("/notes/{note_id}/pin")
+async def set_pinned(note_id: str, body: PinIn, user_id: UserId):
+    await health.require(*health.READ)
+    return {"note": present(await health.run(health.READ, store.set_pinned, user_id, note_id, body.pinned))}
 
 
 @router.post("/notes/{note_id}/append")
@@ -189,6 +246,8 @@ async def create_audio_note(
     x_client_date: Annotated[str | None, Header(alias="X-Client-Date")] = None,
 ):
     """Save the recording, transcribe it with Whisper on Groq, and store the transcript as the note body."""
+    if not settings.audio_notes:
+        raise audio_unavailable()
     await health.require(*health.AUDIO)
     suffix, data = await _read_audio(file)
     today = client_today(x_client_date)

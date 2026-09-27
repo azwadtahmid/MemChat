@@ -105,6 +105,17 @@ export function AudioIcon(props: IconProps) {
 
 // ---------- Controls ----------
 
+/** Pinned: a pushpin, head and needle, in one line weight. */
+export function PinIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M7.6 3.4c1.6-.1 3.2-.1 4.8 0" />
+      <path d="M8.6 3.6l-.5 5.3c-1.6.8-2.6 2-2.9 3.5 3.2.1 6.4.1 9.6 0-.3-1.5-1.3-2.7-2.9-3.5l-.5-5.3" />
+      <path d="M10 12.5c0 1.6 0 3.2.1 4.8" />
+    </Icon>
+  )
+}
+
 /** Opens the assistant: a speech line. */
 export function ChatIcon(props: IconProps) {
   return (

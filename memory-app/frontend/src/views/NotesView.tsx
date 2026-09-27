@@ -2,8 +2,11 @@ import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useRef, useState } from 'react'
 import { api, type Note, type NoteType } from '../api'
 import AudioRecorder from '../components/AudioRecorder'
+import DateRange from '../components/DateRange'
 import NoteCard from '../components/NoteCard'
-import { PlusIcon, SearchIcon } from '../icons'
+import { PrivacyLine } from '../components/Privacy'
+import { CloseIcon, PlusIcon, SearchIcon } from '../icons'
+import { ANY_TIME, bounds, isActive, type RangeChoice } from '../lib/dateRange'
 import { TYPE_LABEL } from '../lib/format'
 import { SECTION_DELAY, UI } from '../lib/motion'
 import type { Filter } from '../Rail'
@@ -13,9 +16,15 @@ interface Props {
   filter: Filter
   version: number // bumps when notes change elsewhere (chat, editor)
   highlights: Record<string, string> // note id -> what the assistant just did to it
+  audioAvailable: boolean // false in the hosted version, where recordings cannot be kept
+  tag: string | null // filter: only notes carrying this tag
+  onTag: (tag: string | null) => void
+  range: RangeChoice // filter: created within this range
+  onRange: (range: RangeChoice) => void
   onOpen: (note: Note) => void
   onCreate: (type: Exclude<NoteType, 'audio'>) => void // creates the note and opens the editor
   onProblem: (err: unknown) => void
+  onPrivacy: () => void
 }
 
 const PICK: NoteType[] = ['text', 'list', 'diary', 'audio']
@@ -43,6 +52,8 @@ const PICK_HINT: Record<NoteType, string> = {
   audio: 'Speak it; it is transcribed',
 }
 
+const AUDIO_UNAVAILABLE = 'Not available in the hosted version yet'
+
 const EMPTY_FILTERED: Record<NoteType, { title: string; body: string }> = {
   text: { title: 'No text notes yet', body: 'Start one with New text note above.' },
   list: { title: 'No lists yet', body: 'Start one with New list above, or ask the assistant to make one.' },
@@ -50,7 +61,20 @@ const EMPTY_FILTERED: Record<NoteType, { title: string; body: string }> = {
   audio: { title: 'No audio notes yet', body: 'Record one above. It is transcribed so you can search it.' },
 }
 
-export default function NotesView({ filter, version, highlights, onOpen, onCreate, onProblem }: Props) {
+export default function NotesView({
+  filter,
+  version,
+  highlights,
+  audioAvailable,
+  tag,
+  onTag,
+  range,
+  onRange,
+  onOpen,
+  onCreate,
+  onProblem,
+  onPrivacy,
+}: Props) {
   const [query, setQuery] = useState('')
   const [notes, setNotes] = useState<Note[] | null>(null)
   const [picking, setPicking] = useState(false)
@@ -66,14 +90,21 @@ export default function NotesView({ filter, version, highlights, onOpen, onCreat
     setRecording(false)
   }
 
-  // List, or search when there is a query. Waits for typing to pause.
+  // List, or search when there is a query. Waits for typing to pause. The tag
+  // and date range are exact filters applied to either, never a separate mode.
+  const rangeKey = JSON.stringify(range)
   useEffect(() => {
     let cancelled = false
-    const type = filter === 'all' ? undefined : filter
+    const filters = {
+      type: filter === 'all' ? undefined : filter,
+      tags: tag ? [tag] : undefined,
+      ...bounds(JSON.parse(rangeKey) as RangeChoice),
+    }
+    const narrowed = !!filters.tags || !!filters.created_from || !!filters.created_to
     const q = query.trim()
     const timer = window.setTimeout(
       () => {
-        ;(q ? api.searchNotes(q, type) : api.listNotes(type))
+        ;(q ? api.searchNotes(q, filters) : narrowed ? api.filterNotes(filters) : api.listNotes(filters.type))
           .then((found) => !cancelled && setNotes(found))
           .catch((err) => !cancelled && onProblem(err))
       },
@@ -83,7 +114,7 @@ export default function NotesView({ filter, version, highlights, onOpen, onCreat
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [filter, query, version, onProblem])
+  }, [filter, query, tag, rangeKey, version, onProblem])
 
   // Close the type options on a click elsewhere or Escape.
   useEffect(() => {
@@ -106,16 +137,18 @@ export default function NotesView({ filter, version, highlights, onOpen, onCreat
   }, [picking])
 
   function create(type: NoteType) {
+    if (type === 'audio' && !audioAvailable) return
     setPicking(false)
     if (type === 'audio') setRecording(true)
     else onCreate(type)
   }
 
   const searching = query.trim() !== ''
+  const narrowed = tag !== null || isActive(range)
   const count = notes && !searching ? notes.length : null
   // A new filter or search is a new list: keyed, so it swaps rather than
   // animating every card out. Deletions within the same list animate out.
-  const listKey = `${filter}|${query.trim()}`
+  const listKey = `${filter}|${query.trim()}|${tag}|${rangeKey}`
 
   return (
     <section className="view notes-view" aria-labelledby="notes-title">
@@ -138,6 +171,18 @@ export default function NotesView({ filter, version, highlights, onOpen, onCreat
             aria-label="Search notes"
           />
         </label>
+        <div className="search-filters">
+          <DateRange value={range} onChange={onRange} />
+          {tag && (
+            <p className="tag-filter">
+              <span className="date-range-label">Tagged</span>
+              <span className="tag">{tag}</span>
+              <button type="button" className="tag-remove" aria-label={`Stop filtering by ${tag}`} onClick={() => onTag(null)}>
+                <CloseIcon />
+              </button>
+            </p>
+          )}
+        </div>
       </div>
 
       <div className="new-note" ref={newRef}>
@@ -155,6 +200,8 @@ export default function NotesView({ filter, version, highlights, onOpen, onCreat
               ref={newButtonRef}
               type="button"
               className="new-note-button"
+              aria-disabled={filter === 'audio' && !audioAvailable ? true : undefined}
+              aria-describedby={filter === 'audio' && !audioAvailable ? 'audio-unavailable' : undefined}
               aria-expanded={filter === 'all' ? picking : undefined}
               aria-controls={filter === 'all' ? 'new-note-options' : undefined}
               onClick={() => (filter === 'all' ? setPicking((p) => !p) : create(filter))}
@@ -162,6 +209,11 @@ export default function NotesView({ filter, version, highlights, onOpen, onCreat
               <PlusIcon className="new-note-plus" />
               {NEW_LABEL[filter]}
             </button>
+            {filter === 'audio' && !audioAvailable && (
+              <p className="new-note-note" id="audio-unavailable">
+                {AUDIO_UNAVAILABLE}. Recordings cannot be stored here, so none is taken.
+              </p>
+            )}
             <AnimatePresence initial={false}>
               {picking && (
                 <motion.ul
@@ -173,12 +225,21 @@ export default function NotesView({ filter, version, highlights, onOpen, onCreat
                 >
                   {PICK.map((t) => {
                     const Icon = TYPE_ICON[t]
+                    // Kept focusable with aria-disabled, so the reason is read out.
+                    const off = t === 'audio' && !audioAvailable
                     return (
                       <li key={t}>
-                        <button type="button" className="new-note-option" onClick={() => create(t)}>
+                        <button
+                          type="button"
+                          className="new-note-option"
+                          aria-disabled={off || undefined}
+                          onClick={() => create(t)}
+                        >
                           <Icon className="new-note-glyph" />
                           <span className="new-note-name">{TYPE_LABEL[t]}</span>
-                          <span className="new-note-hint">{PICK_HINT[t]}</span>
+                          <span className="new-note-hint" data-off={off || undefined}>
+                            {off ? AUDIO_UNAVAILABLE : PICK_HINT[t]}
+                          </span>
                         </button>
                       </li>
                     )
@@ -198,7 +259,24 @@ export default function NotesView({ filter, version, highlights, onOpen, onCreat
         </ul>
       ) : notes.length === 0 ? (
         <div className="empty">
-          {searching ? (
+          {narrowed ? (
+            <>
+              <h2>Nothing matches these filters</h2>
+              <p>
+                {searching ? 'Try other words, or widen the filters.' : 'No notes carry that tag in that time.'}{' '}
+                <button
+                  type="button"
+                  className="link"
+                  onClick={() => {
+                    onTag(null)
+                    onRange(ANY_TIME)
+                  }}
+                >
+                  Clear the filters
+                </button>
+              </p>
+            </>
+          ) : searching ? (
             <>
               <h2>Nothing matches that search</h2>
               <p>Search looks for meaning, so try describing the note in other words.</p>
@@ -207,11 +285,16 @@ export default function NotesView({ filter, version, highlights, onOpen, onCreat
             <>
               <h2>Nothing written yet</h2>
               <p>Start with New note above, or open the assistant on the right and ask it to begin a list for you.</p>
+              <PrivacyLine onMore={onPrivacy} />
             </>
           ) : (
             <>
               <h2>{EMPTY_FILTERED[filter].title}</h2>
-              <p>{EMPTY_FILTERED[filter].body}</p>
+              <p>
+                {filter === 'audio' && !audioAvailable
+                  ? 'Audio notes are not available in the hosted version yet.'
+                  : EMPTY_FILTERED[filter].body}
+              </p>
             </>
           )}
         </div>
@@ -227,7 +310,9 @@ export default function NotesView({ filter, version, highlights, onOpen, onCreat
                   index={i}
                   section={SECTION_DELAY.notes}
                   change={highlights[n.id]}
+                  activeTag={tag}
                   onOpen={onOpen}
+                  onTag={(t) => onTag(t === tag ? null : t)}
                 />
               ))}
             </AnimatePresence>

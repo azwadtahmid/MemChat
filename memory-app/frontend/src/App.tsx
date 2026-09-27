@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, localDate, ServiceError, type Health, type Note, type NoteType, type Problem } from './api'
 import ChatPanel from './components/ChatPanel'
+import Privacy from './components/Privacy'
+import { ANY_TIME, type RangeChoice } from './lib/dateRange'
 import Rail, { type Filter, type Tab } from './Rail'
 import Scenery from './scenery/Landscape'
 import DiaryView from './views/DiaryView'
@@ -36,6 +38,9 @@ function Seal() {
 export default function App() {
   const [view, setView] = useState<View>({ kind: 'notes' })
   const [filter, setFilter] = useState<Filter>('all')
+  // Kept here rather than in the notes view, so they survive opening a note.
+  const [tag, setTag] = useState<string | null>(null)
+  const [range, setRange] = useState<RangeChoice>(ANY_TIME)
   const [health, setHealth] = useState<Health | null>(null)
   const [checking, setChecking] = useState(true)
   const [problems, setProblems] = useState<Problem[]>([])
@@ -43,9 +48,14 @@ export default function App() {
   const [version, setVersion] = useState(0) // bumps whenever notes change
   const [highlights, setHighlights] = useState<Record<string, string>>({}) // note id -> chat action
   const [dirtyNote, setDirtyNote] = useState<string | null>(null)
+  const [privacyOpen, setPrivacyOpen] = useState(false)
   const tabRef = useRef<HTMLButtonElement>(null)
 
   const tab: Tab = view.kind === 'editor' ? view.back : view.kind
+  const retentionDays = health?.config.trash_retention_days ?? 30
+  // Until the health check answers, assume audio works; the backend refuses it
+  // with a plain message where recordings cannot be kept.
+  const audioAvailable = health?.config.audio_notes ?? true
 
   useEffect(() => {
     try {
@@ -163,6 +173,7 @@ export default function App() {
         problems={problems}
         checking={checking}
         onRecheck={() => void checkHealth()}
+        onPrivacy={() => setPrivacyOpen(true)}
       />
 
       <main className="field">
@@ -188,8 +199,14 @@ export default function App() {
             filter={filter}
             version={version}
             highlights={highlights}
+            audioAvailable={audioAvailable}
+            tag={tag}
+            onTag={setTag}
+            range={range}
+            onRange={setRange}
             onOpen={openNote}
             onCreate={(t) => void createNote(t)}
+            onPrivacy={() => setPrivacyOpen(true)}
             onProblem={onProblem}
           />
         )}
@@ -203,7 +220,7 @@ export default function App() {
             noteId={view.noteId}
             newType={view.newType}
             version={version}
-            retentionDays={health?.config.trash_retention_days ?? 30}
+            retentionDays={retentionDays}
             fresh={!!view.fresh}
             onDiscarded={() => setVersion((v) => v + 1)}
             onBack={() => setView({ kind: view.back })}
@@ -229,6 +246,8 @@ export default function App() {
         <Seal />
         <span className="chat-tab-label">Assistant</span>
       </button>
+
+      <Privacy open={privacyOpen} onClose={() => setPrivacyOpen(false)} retentionDays={retentionDays} />
 
       <ChatPanel
         open={chatOpen}

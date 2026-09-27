@@ -38,6 +38,9 @@ class ChatIn(BaseModel):
     source: Literal["typed", "voice"] = "typed"
     # Notes open in the editor with unsaved changes; the assistant will not write to them.
     locked_note_ids: list[str] = Field(default_factory=list, max_length=50)
+    # The browser's UTC offset in minutes, so "notes from August" means the
+    # user's August. Sent in the body, not a header, to keep CORS unchanged.
+    tz_offset_minutes: int = Field(0, ge=-14 * 60, le=14 * 60)
 
 
 def _clean(history: list[dict]) -> list[dict]:
@@ -136,6 +139,6 @@ async def chat(body: ChatIn, user_id: UserId,
 
     turn = tools.Turn(
         user_id=user_id, today=client_today(x_client_date), voice=body.source == "voice",
-        locked=set(body.locked_note_ids), messages=[],
+        locked=set(body.locked_note_ids), messages=[], tz_offset_minutes=body.tz_offset_minutes,
     )
     return StreamingResponse(agent.run_turn(turn, prior, new), media_type="application/x-ndjson")

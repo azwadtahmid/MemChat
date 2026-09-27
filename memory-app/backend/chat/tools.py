@@ -12,7 +12,7 @@ refuse (and tell the model why) when:
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta, timezone
 
 import store
 from config import settings
@@ -31,6 +31,7 @@ class Turn:
     locked: set[str]  # note ids open in the editor with unsaved changes
     messages: list[dict]  # this conversation so far, including this turn
     changes: list[dict] = field(default_factory=list)
+    tz_offset_minutes: int = 0  # the user's UTC offset, so date ranges mean their days
 
 
 class Refused(Exception):
@@ -44,6 +45,9 @@ class Refused(Exception):
 NOTE_TYPE = {"type": ["string", "null"], "enum": ["text", "list", "diary", "audio", None]}
 OPTIONAL_TEXT = {"type": ["string", "null"]}
 WRITABLE_TYPE = {"type": "string", "enum": ["text", "list", "diary"]}
+TAGS = {"type": ["array", "null"], "items": {"type": "string"},
+        "description": "Only notes carrying all of these tags."}
+DAY = {"type": ["string", "null"], "description": "YYYY-MM-DD, inclusive. Filters by the date the note was created."}
 
 
 def _tool(name: str, description: str, properties: dict, required: list[str]) -> dict:
@@ -54,12 +58,18 @@ def _tool(name: str, description: str, properties: dict, required: list[str]) ->
 
 
 SCHEMAS = [
-    _tool("search_notes", "Similarity search over the user's notes. Use for questions and to find a note to change.",
-          {"query": {"type": "string"}, "type": NOTE_TYPE}, ["query"]),
-    _tool("list_notes", "List the user's notes, newest first, optionally only one type. A straight lookup, not a search.",
-          {"type": NOTE_TYPE}, []),
-    _tool("create_note", "Create a note. For type diary this appends to today's entry if it exists.",
-          {"type": WRITABLE_TYPE, "title": {"type": "string"}, "body": {"type": "string"}}, ["type", "title", "body"]),
+    _tool("search_notes", "Similarity search over the user's notes. Use for questions and to find a note to change. "
+          "Optionally narrowed to notes with given tags and to a range of created dates.",
+          {"query": {"type": "string"}, "type": NOTE_TYPE, "tags": TAGS, "date_from": DAY, "date_to": DAY}, ["query"]),
+    _tool("list_notes", "List the user's notes, pinned first then newest, optionally only one type or only notes "
+          "with given tags. A straight lookup, not a search.",
+          {"type": NOTE_TYPE, "tags": TAGS}, []),
+    _tool("create_note", "Create a note, optionally with tags. For type diary this appends to today's entry if it "
+          "exists, and adds any tags to it.",
+          {"type": WRITABLE_TYPE, "title": {"type": "string"}, "body": {"type": "string"},
+           "tags": {"type": ["array", "null"], "items": {"type": "string"},
+                    "description": "Short lowercase tags to add. Tags can only be added, never removed."}},
+          ["type", "title", "body"]),
     _tool("append_to_note", "Add text to the end of a note. For lists, one item per line.",
           {"note_id": {"type": "string"}, "text": {"type": "string"}}, ["note_id", "text"]),
     _tool("update_note", "Replace a note's title and/or body. Only when the user asks to rewrite or correct.",
@@ -98,6 +108,8 @@ def summary(note: dict, with_body: bool = True) -> dict:
            "created": _day(note.get("created")), "last_edited": _day(note.get("updated"))}
     if note.get("entry_date"):
         out["diary_date"] = note["entry_date"]
+    if note.get("tags"):
+        out["tags"] = note["tags"]
     if with_body:
         body = note.get("body", "")
         out["body"] = body if len(body) <= BODY_LIMIT else body[:BODY_LIMIT] + " [truncated]"
@@ -141,22 +153,46 @@ def _confirmed_delete(turn: Turn, note_id: str) -> bool:
 # ---------- Implementations ----------
 
 
-def search_notes(turn: Turn, query: str, type: str | None = None) -> dict:
-    found = store.search(turn.user_id, query, type, limit=settings.chat_search_limit)
+def _tags(tags) -> list[str] | None:
+    if tags is None:
+        return None
+    if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+        raise Refused("tags must be a list of strings.")
+    return tags
+
+
+def _day_start(turn: Turn, value: str, name: str) -> datetime:
+    """Midnight at the start of a YYYY-MM-DD day, in the user's own timezone."""
+    try:
+        day = date.fromisoformat(value)
+    except (TypeError, ValueError):
+        raise Refused(f"{name} must be a date written YYYY-MM-DD.") from None
+    return datetime.combine(day, time(), tzinfo=timezone(timedelta(minutes=turn.tz_offset_minutes)))
+
+
+def search_notes(turn: Turn, query: str, type: str | None = None, tags: list[str] | None = None,
+                 date_from: str | None = None, date_to: str | None = None) -> dict:
+    start = _day_start(turn, date_from, "date_from") if date_from else None
+    # date_to is inclusive, so the range ends at the start of the following day.
+    end = _day_start(turn, date_to, "date_to") + timedelta(days=1) if date_to else None
+    if start and end and start >= end:
+        raise Refused("date_from must be on or before date_to.")
+    found = store.search(turn.user_id, query, type, limit=settings.chat_search_limit,
+                         tags=_tags(tags), created_from=start, created_to=end)
     return {"results": [summary(n) for n in found]} if found else {"results": [], "note": "No matching notes."}
 
 
-def list_notes(turn: Turn, type: str | None = None) -> dict:
-    notes = store.list_notes(turn.user_id, type)
+def list_notes(turn: Turn, type: str | None = None, tags: list[str] | None = None) -> dict:
+    notes = store.list_notes(turn.user_id, type, tags=_tags(tags))
     return {"count": len(notes), "notes": [summary(n, with_body=False) for n in notes[:50]]}
 
 
-def create_note(turn: Turn, type: str, title: str, body: str) -> dict:
+def create_note(turn: Turn, type: str, title: str, body: str, tags: list[str] | None = None) -> dict:
     if type not in ("text", "list", "diary"):
         raise Refused("Only text, list and diary notes can be created from chat. Audio notes are recorded in the app.")
     if type == "diary" and (today := store.today_diary(turn.user_id, turn.today)):
         _writable(turn, today)
-    note, appended = store.create(turn.user_id, type, title, body, today=turn.today)
+    note, appended = store.create(turn.user_id, type, title, body, today=turn.today, tags=_tags(tags))
     _record(turn, "appended" if appended else "created", note)
     return {"status": "appended to today's diary entry" if appended else "created", "note": summary(note)}
 

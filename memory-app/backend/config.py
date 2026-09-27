@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from pydantic import SecretStr
@@ -34,8 +35,11 @@ class Settings(BaseSettings):
     embed_cache_dir: Path = BACKEND_DIR / ".model_cache"
 
     # ---------- Audio ----------
-    # Local disk for now. Needs object storage before deploying to Render,
-    # whose disk is wiped on every deploy and restart.
+    # Recordings go to local disk. Render's disk is wiped on every deploy and
+    # restart, so there audio notes are refused rather than kept for a while and
+    # silently lost. Unset means: on unless running on Render, which sets
+    # RENDER=true. AUDIO_NOTES_ENABLED=true or false overrides that.
+    audio_notes_enabled: bool | None = None
     audio_dir: Path = BACKEND_DIR / "audio_files"
     audio_max_mb: int = 25
     # Signs the short-lived audio URLs. If empty, a random secret is made at
@@ -57,6 +61,12 @@ class Settings(BaseSettings):
     # Browser origins allowed to call the API, comma separated. In dev the Vite
     # proxy makes calls same-origin; a deployed frontend needs its URL here.
     allowed_origins: str = "http://localhost:5173"
+
+    @property
+    def audio_notes(self) -> bool:
+        if self.audio_notes_enabled is not None:
+            return self.audio_notes_enabled
+        return os.environ.get("RENDER", "").lower() != "true"
 
     @property
     def cors_origins(self) -> list[str]:

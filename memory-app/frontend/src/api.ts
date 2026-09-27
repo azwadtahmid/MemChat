@@ -27,6 +27,16 @@ export interface Note {
   entry_date?: string
   audio_url?: string
   score?: number
+  tags?: string[]
+  pinned?: boolean
+}
+
+/** Exact filters for listing or searching: all tags must be present; created in [from, to). */
+export interface NoteFilters {
+  type?: NoteType
+  tags?: string[]
+  created_from?: string
+  created_to?: string
 }
 
 /** One thing that is wrong, named specifically, with how to fix it. */
@@ -46,6 +56,7 @@ export interface Health {
     embed_model: string
     collection: string
     trash_retention_days: number
+    audio_notes?: boolean // false where recordings cannot be kept (the hosted version)
   }
 }
 
@@ -123,9 +134,15 @@ export const api = {
 
   listNotes: (type?: NoteType) =>
     json<{ notes: Note[] }>(request(`/notes${type ? `?type=${type}` : ''}`)).then((r) => r.notes),
-  // A POST body, so search text stays out of URLs and access logs.
-  searchNotes: (query: string, type?: NoteType) =>
-    json<{ notes: Note[] }>(request('/notes/search', send('POST', { query, type }))).then((r) => r.notes),
+  // POST bodies, so search text and tags stay out of URLs and access logs.
+  filterNotes: (filters: NoteFilters) =>
+    json<{ notes: Note[] }>(request('/notes/list', send('POST', filters))).then((r) => r.notes),
+  searchNotes: (query: string, filters: NoteFilters = {}) =>
+    json<{ notes: Note[] }>(request('/notes/search', send('POST', { query, ...filters }))).then((r) => r.notes),
+  setTags: (id: string, tags: string[]) =>
+    json<{ note: Note }>(request(`/notes/${id}/tags`, send('PUT', { tags }))).then((r) => r.note),
+  setPinned: (id: string, pinned: boolean) =>
+    json<{ note: Note }>(request(`/notes/${id}/pin`, send('PUT', { pinned }))).then((r) => r.note),
   getNote: (id: string) => json<{ note: Note }>(request(`/notes/${id}`)).then((r) => r.note),
   createNote: (type: NoteType, title: string, body: string) =>
     json<{ note: Note; appended_to_existing: boolean }>(request('/notes', send('POST', { type, title, body }))),
@@ -164,10 +181,11 @@ export interface ChatRequest {
   answer?: { tool_call_id: string; text: string; value?: string | null; note_id?: string | null }
   source: 'typed' | 'voice'
   locked_note_ids: string[]
+  tz_offset_minutes?: number // so a month the user names means their own month
 }
 
 export async function streamChat(body: ChatRequest, onEvent: (e: ChatEvent) => void): Promise<void> {
-  const res = await request('/chat', send('POST', body))
+  const res = await request('/chat', send('POST', { tz_offset_minutes: -new Date().getTimezoneOffset(), ...body }))
   const reader = res.body!.pipeThrough(new TextDecoderStream()).getReader()
   let buffer = ''
   for (;;) {

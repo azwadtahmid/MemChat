@@ -57,5 +57,6 @@ async def get_health():
             "embed_model": settings.embed_model,
             "collection": settings.notes_collection,
             "trash_retention_days": settings.trash_retention_days,
+            "audio_notes": settings.audio_notes,
         },
     }
